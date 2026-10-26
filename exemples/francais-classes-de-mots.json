@@ -9,23 +9,42 @@
       "id": "fr-cm-001",
       "type": "qcm",
       "question": "Dans la phrase « Le petit chat dort », quelle est la classe du mot **petit** ?",
-      "options": ["Nom", "Adjectif", "Verbe", "Déterminant"],
+      "options": [
+        "Nom",
+        "Adjectif",
+        "Verbe",
+        "Déterminant"
+      ],
       "reponse": "Adjectif",
       "indice": "Ce mot donne une précision sur le chat.",
-      "explication": "« Petit » précise le nom « chat » : c'est un adjectif."
+      "explication": "« Petit » précise le nom « chat » : c'est un adjectif.",
+      "astuce": "L'adjectif répond à la question « comment est-il ? »."
     },
     {
       "id": "fr-cm-002",
       "type": "association",
       "question": "Associe chaque mot de la phrase « Les élèves lisent rapidement » à sa classe.",
       "paires": [
-        { "gauche": "Les", "droite": "Déterminant" },
-        { "gauche": "élèves", "droite": "Nom" },
-        { "gauche": "lisent", "droite": "Verbe" },
-        { "gauche": "rapidement", "droite": "Adverbe" }
+        {
+          "gauche": "Les",
+          "droite": "Déterminant"
+        },
+        {
+          "gauche": "élèves",
+          "droite": "Nom"
+        },
+        {
+          "gauche": "lisent",
+          "droite": "Verbe"
+        },
+        {
+          "gauche": "rapidement",
+          "droite": "Adverbe"
+        }
       ],
       "indice": "Les mots qui finissent en « -ment » sont souvent des adverbes.",
-      "explication": "Les (déterminant) élèves (nom) lisent (verbe) rapidement (adverbe)."
+      "explication": "Les (déterminant) élèves (nom) lisent (verbe) rapidement (adverbe).",
+      "astuce": "Truc : le verbe se conjugue, l'adverbe en -ment ne change jamais."
     },
     {
       "id": "fr-cm-003",
@@ -40,10 +59,22 @@
       "id": "fr-cm-004",
       "type": "choix_multiples",
       "question": "Lesquels de ces mots sont des **déterminants** ?",
-      "options": ["le", "mon", "chien", "ces", "beau", "courir"],
-      "reponses": ["le", "mon", "ces"],
+      "options": [
+        "le",
+        "mon",
+        "chien",
+        "ces",
+        "beau",
+        "courir"
+      ],
+      "reponses": [
+        "le",
+        "mon",
+        "ces"
+      ],
       "indice": "Le déterminant se place devant le nom pour l'introduire.",
-      "explication": "Le, mon et ces sont des déterminants. Chien est un nom, beau un adjectif et courir un verbe."
+      "explication": "Le, mon et ces sont des déterminants. Chien est un nom, beau un adjectif et courir un verbe.",
+      "astuce": "Le déterminant est le petit mot juste avant le nom."
     }
   ]
 }
