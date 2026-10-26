@@ -50,6 +50,7 @@ function friendlyGeminiError(status, msg) {
   if (status === 429 || /quota|RESOURCE_EXHAUSTED/i.test(m)) return 'Quota Gemini atteint. Avec une clé gratuite, attends quelques minutes ; les illustrations demandent une clé payante.';
   if (status === 404) return `Modèle introuvable (${m.slice(0, 120)}). Réglages › Mode parent › Tester pour le mettre à jour.`;
   if (status === 403) return 'Accès refusé par Gemini : ' + m.slice(0, 160);
+  if (status === 503 || status === 500 || status === 502 || status === 504 || /high demand|overloaded|UNAVAILABLE/i.test(m)) return 'Gemini est surchargé en ce moment. Réessaie dans quelques minutes.';
   return `Erreur Gemini ${status || ''} : ${m.slice(0, 200)}`;
 }
 
@@ -136,17 +137,23 @@ const QUESTION_SCHEMA = {
 };
 const MISSION_SCHEMA = {
   type: 'OBJECT',
-  properties: { source: { type: 'STRING' }, questions: { type: 'ARRAY', items: QUESTION_SCHEMA } },
+  properties: { theme: { type: 'STRING' }, source: { type: 'STRING' }, questions: { type: 'ARRAY', items: QUESTION_SCHEMA } },
   required: ['questions'],
 };
 
+/* Thème laissé vide (ou « je ne sais pas ») : Gemini le déduit des pages */
+const UNKNOWN_THEME = /^(je ne sais pas|je sais pas|sais pas|\?+|inconnu|aucun|a determiner|-)$/;
+const themeGiven = (C) => { const t = C.theme.trim(); return t && !UNKNOWN_THEME.test(loose(t)) ? t : ''; };
+
 function buildPrompt(C, matiere) {
   const illus = C.illus;
+  const theme = themeGiven(C);
+  const existing = S.db && S.db.tree[matiere] ? Object.keys(S.db.tree[matiere]) : [];
   return `Tu es un enseignant expérimenté qui prépare un élève à une évaluation. À partir des photos de pages de manuel ci-jointes (numérotées Photo 1, Photo 2…), crée des questions de révision.
 
 PARAMÈTRES
 - Matière : ${matiere}
-- Thème : ${C.theme}
+- Thème : ${theme || 'non fourni : déduis-le des pages (titre du chapitre ou de la section, 2 à 6 mots) et renvoie-le dans « theme »'}${!theme && existing.length ? `. Thèmes existants dans cette matière : ${existing.map((t) => `« ${t} »`).join(', ')} ; si les pages correspondent à l'un d'eux, reprends exactement ce nom` : ''}
 - Niveau : ${S.parent.niveau || 'Secondaire 1 (Québec)'}
 - Nombre de questions : ${C.n} (les sous-questions d'une mise en situation comptent chacune pour une)
 - Répartition : environ 40 % qcm, 15 % vrai_faux, 15 % choix_multiples, 10 % association, 10 % ordre, et ${C.n >= 12 ? '1 ou 2 mises en situation (type « situation », 2 à 4 sous_questions chacune)' : 'au plus 1 mise en situation'}.
@@ -178,7 +185,7 @@ ${illus
 - Pour tout visuel, « description » contient aussi une phrase qui décrit l'image (texte alternatif).
 
 VÉRIFICATION AVANT DE RÉPONDRE : nombre total de questions, chaque réponse copiée exactement d'une option, aucune erreur scientifique, zones bien cadrées.
-« source » : par exemple « Manuel, p. 112-118 ».`;
+« source » : par exemple « Manuel, p. 112-118 ». « theme » : ${theme ? `« ${theme} »` : 'le thème déduit des pages'}.`;
 }
 
 /* ================================ Génération ================================ */
@@ -192,13 +199,16 @@ async function geminiQuestions(C, matiere) {
     contents: [{ role: 'user', parts }],
     generationConfig: Object.assign({ responseMimeType: 'application/json', temperature: 0.7, maxOutputTokens: 32768 }, schema ? { responseSchema: MISSION_SCHEMA } : {}),
   });
-  let j;
-  try { j = await geminiFetch(`models/${S.parent.textModel}:generateContent`, body(true)); }
-  catch (e) {
-    // Certains modèles refusent un schéma trop riche : on réessaie avec le JSON simple
-    if (e.status === 400 && /schema|response_schema|responseSchema/i.test(e.raw || '')) j = await geminiFetch(`models/${S.parent.textModel}:generateContent`, body(false));
-    else throw e;
-  }
+  const call = async (model) => {
+    C.usedModel = model;
+    try { return await geminiFetch(`models/${model}:generateContent`, body(true)); }
+    catch (e) {
+      // Certains modèles refusent un schéma trop riche : on réessaie avec le JSON simple
+      if (e.status === 400 && /schema|response_schema|responseSchema/i.test(e.raw || '')) return geminiFetch(`models/${model}:generateContent`, body(false));
+      throw e;
+    }
+  };
+  const j = await withFallback(C, textModelChain(), call, 'Gemini lit les pages et rédige les questions…');
   const cand = j.candidates && j.candidates[0];
   const text = cand && cand.content && (cand.content.parts || []).map((p) => p.text || '').join('');
   if (!text) throw new Error('Gemini n\'a pas renvoyé de questions' + (cand && cand.finishReason ? ` (${cand.finishReason})` : '') + '. Réessaie.');
@@ -210,13 +220,53 @@ async function geminiQuestions(C, matiere) {
   }
 }
 
+/* ---------- Résilience : nouvel essai automatique, puis modèle de secours ---------- */
+const isTransient = (e) => [500, 502, 503, 504].includes(e.status) || (e.status === 429 && /high demand|overloaded|try again/i.test(e.raw || ''));
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/* Modèle choisi, puis jusqu'à 2 autres modèles Flash disponibles (plus récent d'abord, « lite » en dernier) */
+function textModelChain() {
+  const main = S.parent.textModel;
+  const others = (S.parent.models || [])
+    .filter((n) => n !== main && /flash/.test(n) && !/image|tts|live|audio|embedding|preview|exp/.test(n))
+    .sort((a, b) => (/lite/.test(a) - /lite/.test(b)) || versionOf(b) - versionOf(a));
+  return [main, ...others.slice(0, 2)];
+}
+
+async function withFallback(C, models, call, label) {
+  const waits = [3, 8, 15];
+  let last;
+  for (let m = 0; m < models.length; m++) {
+    for (let attempt = 0; attempt <= waits.length; attempt++) {
+      if (S.create !== C) throw new Error('annulé');
+      try {
+        if (m || attempt) setProgress(label, `Essai ${attempt + 1} avec ${models[m]}…`);
+        return await call(models[m]);
+      } catch (e) {
+        last = e;
+        if (!isTransient(e)) throw e;
+        if (attempt < waits.length) {
+          for (let t = waits[attempt]; t > 0; t--) {
+            if (S.create !== C) throw new Error('annulé');
+            setProgress(label, `Gemini est surchargé (${models[m]}). Nouvel essai dans ${t} s…`);
+            await sleep(1000);
+          }
+        }
+      }
+    }
+    if (m + 1 < models.length) setProgress(label, `${models[m]} est indisponible : on passe à ${models[m + 1]}…`);
+  }
+  throw last;
+}
+
 /* Convertit la réponse de Gemini au format de l'app, attribue identifiants et noms de fichiers */
 function toMission(raw, C, matiere) {
   const now = new Date();
+  const theme = themeGiven(C) || String(raw.theme || '').trim().slice(0, 80) || 'Général';
   const stamp = `${String(now.getFullYear()).slice(2)}${pad2(now.getMonth() + 1)}${pad2(now.getDate())}${pad2(now.getHours())}${pad2(now.getMinutes())}`;
   const prefix = slugify(matiere).slice(0, 3) + stamp;
   const day = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
-  const base = `${slugify(C.theme).slice(0, 40)}-${day}-${pad2(now.getHours())}${pad2(now.getMinutes())}`;
+  const base = `${slugify(theme).slice(0, 40)}-${day}-${pad2(now.getHours())}${pad2(now.getMinutes())}`;
   const tasks = [];
 
   const convert = (q, id) => {
@@ -253,10 +303,10 @@ function toMission(raw, C, matiere) {
 
   const questions = (raw.questions || []).map((q, i) => convert(q, `${prefix}-${pad2(i + 1)}`));
   const data = {
-    format: 'mission-revision/1', matiere, theme: C.theme.trim(),
+    format: 'mission-revision/1', matiere, theme,
     titre: C.titre.trim() || undefined, niveau: S.parent.niveau || undefined,
     source: raw.source || undefined,
-    genere: { par: S.parent.textModel, le: now.toISOString() },
+    genere: { par: C.usedModel || S.parent.textModel, le: now.toISOString() },
     questions,
   };
   return { data, tasks, files: {}, fileName: base + '.json', base, removed: new Set(), warnings: [] };
@@ -317,7 +367,6 @@ async function generateMission() {
   const C = S.create;
   const matiere = (C.matiere === '__new' ? C.matiereNew : C.matiere).trim();
   if (!matiere) { toast('Indique la matière.'); return; }
-  if (!C.theme.trim()) { toast('Indique le thème.'); return; }
   if (!C.photos.length) { toast('Ajoute au moins une photo.'); return; }
   C.stage = 'gen'; C.error = ''; C.progress = { step: '', detail: '', startedAt: Date.now() };
   setProgress('Gemini lit les pages et rédige les questions…', `${C.photos.length} photo(s) · ${C.n} questions · environ 1 minute`);
@@ -338,7 +387,7 @@ async function generateMission() {
       const t = ill[k];
       if (stopIllus) { delete t.q.image; continue; }
       setProgress('Création des illustrations…', `${k + 1} / ${ill.length}`);
-      try { D.files[t.name] = await generateIllustration(t); }
+      try { D.files[t.name] = await withFallback(C, [S.parent.imageModel], () => generateIllustration(t), `Création des illustrations… (${k + 1} / ${ill.length})`); }
       catch (e) {
         delete t.q.image;
         D.warnings.push(`Illustration non générée : ${e.message}`);
@@ -434,7 +483,7 @@ function viewCreate() {
         </select>
       </label>
       ${C.matiere === '__new' ? `<label>Nom de la nouvelle matière<input id="c-mat" data-bind="matiereNew" type="text" placeholder="ex. Histoire" value="${esc(C.matiereNew)}"></label>` : ''}
-      <label>Thème<input id="c-theme" data-bind="theme" type="text" list="c-themes" placeholder="ex. Masse et volume" value="${esc(C.theme)}"></label>
+      <label>Thème (facultatif)<input id="c-theme" data-bind="theme" type="text" list="c-themes" placeholder="Laisse vide : Gemini le trouvera" value="${esc(C.theme)}"></label>
       <datalist id="c-themes">${themes.map((t) => `<option value="${esc(t)}">`).join('')}</datalist>
       <label>Titre (facultatif)<input id="c-titre" data-bind="titre" type="text" placeholder="ex. Évaluation du 12 novembre" value="${esc(C.titre)}"></label>
     </div>
