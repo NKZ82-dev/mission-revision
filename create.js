@@ -101,10 +101,25 @@ function networkError(e) {
  * active sur le réseau mobile (pas de coupure pendant la minute de rédaction) et permet
  * d'afficher la progression. Coupe si plus rien n'arrive pendant `idleMs`.
  */
-async function geminiStream(model, body, onProgress, idleMs = 150000) {
+/*
+ * Garde-fous : `stallMs` = temps max sans nouvelle question alors que du texte arrive encore
+ * (le modèle tourne en boucle ou dessine un SVG interminable) ; `maxMs` = durée max du lot.
+ * Dans ces deux cas on arrête le flux et on GARDE ce qui est déjà rédigé (finish = 'STALL' / 'TIMEOUT').
+ */
+async function geminiStream(model, body, onProgress, opts = {}) {
+  const idleMs = opts.idleMs || 150000, stallMs = opts.stallMs || 0, maxMs = opts.maxMs || 0, count = opts.count;
   const ctrl = new AbortController();
+  let stopReason = '';
   let idle = setTimeout(() => ctrl.abort(), idleMs);
   const poke = () => { clearTimeout(idle); idle = setTimeout(() => ctrl.abort(), idleMs); };
+  const t0 = Date.now();
+  let lastCount = 0, lastGrowth = Date.now(), text = '';
+  const watch = setInterval(() => {
+    if (stopReason) return;
+    if (maxMs && Date.now() - t0 > maxMs) stopReason = 'TIMEOUT';
+    else if (stallMs && count && Date.now() - lastGrowth > (lastCount ? stallMs : stallMs * 2)) stopReason = 'STALL';
+    if (stopReason) ctrl.abort();
+  }, 1000);
   try {
     let r;
     try {
@@ -122,10 +137,10 @@ async function geminiStream(model, body, onProgress, idleMs = 150000) {
     }
     const reader = r.body.getReader();
     const dec = new TextDecoder();
-    let buf = '', text = '', finish = '', thoughts = 0, usage = null;
+    let buf = '', finish = '', thoughts = 0, usage = null;
     for (;;) {
       let chunk;
-      try { chunk = await reader.read(); } catch (e) { throw networkError(e); }
+      try { chunk = await reader.read(); } catch (e) { if (stopReason) { finish = stopReason; break; } throw networkError(e); }
       if (chunk.done) break;
       poke();
       buf += dec.decode(chunk.value, { stream: true }).replace(/\r/g, '');
@@ -143,10 +158,14 @@ async function geminiStream(model, body, onProgress, idleMs = 150000) {
           if (c && c.finishReason) finish = c.finishReason;
         });
       }
+      if (count) { const n = count(text); if (n > lastCount) { lastCount = n; lastGrowth = Date.now(); } }
       onProgress && onProgress({ text, thoughts });
     }
     return { text, finish, usage };
-  } finally { clearTimeout(idle); }
+  } catch (e) {
+    if (stopReason && e.network) return { text, finish: stopReason, usage: null };
+    throw e;
+  } finally { clearTimeout(idle); clearInterval(watch); }
 }
 
 const versionOf = (name) => { const m = name.match(/gemini-(\d+(?:\.\d+)?)/); return m ? parseFloat(m[1]) : 0; };
@@ -291,7 +310,7 @@ FORMAT PAR TYPE
 
 VISUELS (champ « visuel » obligatoire ; type « aucun » par défaut). Choisis dans cet ordre de priorité :
 1. « figure » (au plus ${q.figure}) : la photo contient déjà un schéma, tableau, graphique ou une image utile à la question → donne « photo » (son numéro) et « zone » = [ymin, xmin, ymax, xmax] de 0 à 1000, cadrée serrée autour de la figure et de ses légendes, SANS texte qui donne la réponse.
-2. « svg » (au plus ${q.svg}) : seulement si un schéma précis est indispensable et absent des pages (instrument gradué, figure géométrique, graphique). Une ligne <svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 L H' width='L' height='H'> (L, H ≤ 300), apostrophes simples, formes simples, font-family='Arial', texte ≥ 13 px. Schéma exact et sobre.
+2. « svg » (au plus ${q.svg}) : seulement si un schéma précis est indispensable et absent des pages (instrument gradué, figure géométrique, graphique). Une ligne <svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 L H' width='L' height='H'> (L, H ≤ 300), apostrophes simples, formes simples, font-family='Arial', texte ≥ 13 px. Schéma exact et sobre, 1 500 caractères au maximum (pas de tracés détaillés).
 ${q.illustration ? `3. « illustration » (au plus ${q.illustration}) : pour rendre une question plus concrète (objet, scène, organisme) quand les pages n'ont pas d'image utile. « description » = description visuelle détaillée. Elle ne doit jamais être nécessaire pour répondre ni montrer la réponse.` : '3. N\'utilise JAMAIS le type « illustration ».'}
 Pour tout visuel, « description » contient une phrase qui décrit l'image.
 
@@ -374,6 +393,8 @@ const Limiter = {
   throttle() { this.max = 1; },
 };
 
+const GEN_LIMITS = { stallMs: 45000, maxMs: 150000 };
+
 async function runBatch(C, matiere, B, row) {
   const parts = [{ text: buildPrompt(C, matiere, B) }];
   B.photos.forEach((i) => {
@@ -383,7 +404,8 @@ async function runBatch(C, matiere, B, row) {
   const body = (schema, think, model) => ({
     contents: [{ role: 'user', parts }],
     generationConfig: Object.assign(
-      { responseMimeType: 'application/json', temperature: 0.7, maxOutputTokens: 24576 },
+      // Plafond proportionnel au lot : évite les réponses qui s'emballent
+      { responseMimeType: 'application/json', temperature: 0.7, maxOutputTokens: Math.min(24576, 3000 + B.n * 1500) },
       schema ? { responseSchema: MISSION_SCHEMA } : {},
       think ? { thinkingConfig: thinkingFor(model) } : {}),
   });
@@ -400,6 +422,10 @@ async function runBatch(C, matiere, B, row) {
         return await geminiStream(model, body(schema, think, model), ({ text, thoughts }) => {
           const n = (text.match(/"question"\s*:/g) || []).length;
           status('run', n ? `≈ ${n} / ${B.n} rédigées` : thoughts ? 'Gemini analyse les pages…' : 'Gemini lit les pages…');
+        }, {
+          // Pas de nouvelle question depuis 45 s (90 s pour la première) ou lot de plus de 2 min 30 : on garde l'acquis
+          count: (t) => (t.match(/"question"\s*:/g) || []).length,
+          stallMs: GEN_LIMITS.stallMs, maxMs: GEN_LIMITS.maxMs,
         });
       } catch (e) {
         if (e.status === 429 && Limiter.max > 1) { Limiter.throttle(); genLog(C, 'Limite de débit atteinte : passage à un lot à la fois'); }
@@ -414,7 +440,7 @@ async function runBatch(C, matiere, B, row) {
     const res = await withFallback(C, textModelChain(), call, (msg) => status('retry', msg));
     const { j, partial } = parseMission(res.text || '');
     const u = res.usage || {};
-    genLog(C, `${row.label} : ${j.questions.length} question(s) reçue(s) de ${row.model} en ${Math.round((Date.now() - t0) / 1000)} s · fin=${res.finish || '?'}${partial ? ' · réponse incomplète récupérée' : ''} · jetons entrée ${u.promptTokenCount || '?'}, sortie ${u.candidatesTokenCount || '?'}, réflexion ${u.thoughtsTokenCount || 0}`);
+    genLog(C, `${row.label} : ${j.questions.length} question(s) reçue(s) de ${row.model} en ${Math.round((Date.now() - t0) / 1000)} s · fin=${res.finish || '?'}${res.finish === 'STALL' ? ' (bloqué, arrêté)' : res.finish === 'TIMEOUT' ? ' (trop long, arrêté)' : ''}${partial ? ' · réponse incomplète récupérée' : ''} · jetons entrée ${u.promptTokenCount || '?'}, sortie ${u.candidatesTokenCount || '?'}, réflexion ${u.thoughtsTokenCount || 0}`);
     status('ok', `${j.questions.length} reçue(s)`);
     return j;
   } catch (e) {
@@ -592,7 +618,7 @@ function resolveVisuals(D, C) {
     if (v) {
       if (v.type === 'figure' && used.figure < quota.figure && Array.isArray(v.zone) && v.zone.length === 4 && v.photo >= 1 && v.photo <= C.photos.length) {
         used.figure++; o.image = `${o.id}-figure.jpg`; tasks.push({ kind: 'figure', name: o.image, photo: v.photo - 1, zone: v.zone, q: o });
-      } else if (v.type === 'svg' && used.svg < quota.svg && /^<svg[\s>]/i.test(String(v.svg || '').trim())) {
+      } else if (v.type === 'svg' && used.svg < quota.svg && /^<svg[\s>]/i.test(String(v.svg || '').trim()) && /<\/svg>\s*$/i.test(String(v.svg)) && String(v.svg).length < 8000) {
         used.svg++; o.svg = String(v.svg).trim();
       } else if (v.type === 'illustration' && C.illus && S.parent.imageModel && used.illustration < quota.illustration && v.description) {
         used.illustration++; o.image = `${o.id}-illustration.jpg`; tasks.push({ kind: 'illustration', name: o.image, description: v.description, q: o });
@@ -704,13 +730,18 @@ async function generateMission() {
     // 2. Complément automatique s'il en manque
     const missing = C.n - total;
     if (missing > 0) {
-      const row = { label: 'Complément', info: `${missing} question(s) manquante(s)`, state: 'wait', msg: '' };
-      C.progress.rows.push(row);
+      // Lots de complément de 8 questions max, en parallèle
       setProgress('Gemini complète les questions manquantes…', `${total} / ${C.n} prêtes`);
-      const B = { n: Math.min(missing, 12), photos: C.photos.map((_, i) => i), types: DEFAULT_MIX, situations: 0, focus: 'toutes les pages', avoid: kept.map((q) => q.question || q.titre).filter(Boolean).slice(0, 40) };
-      const extra = await runBatch(C, matiere, B, row);
+      const avoid = kept.map((q) => q.question || q.titre).filter(Boolean).slice(0, 40);
+      const chunks = [];
+      for (let left = missing; left > 0; left -= 8) chunks.push(Math.min(8, left));
+      const extras = await Promise.all(chunks.map((n, k) => {
+        const row = { label: chunks.length > 1 ? `Complément ${k + 1}` : 'Complément', info: `${n} question(s) manquante(s)`, state: 'wait', msg: '' };
+        C.progress.rows.push(row);
+        return runBatch(C, matiere, { n, photos: C.photos.map((_, i) => i), types: DEFAULT_MIX, situations: 0, focus: 'toutes les pages', avoid }, row);
+      }));
       if (S.create !== C) return;
-      if (extra) await accept((extra.questions || []).slice(0, B.n + 2));
+      await accept(extras.flatMap((x, k) => (x ? (x.questions || []).slice(0, chunks[k] + 2) : [])));
       total = kept.reduce((a, q) => a + pointsOf(q), 0);
       genLog(C, `Après complément : ${total} question(s) valide(s)`);
     }
