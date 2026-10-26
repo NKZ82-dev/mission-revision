@@ -1,7 +1,7 @@
 /* Mission Révision — PWA de quiz alimentée par un dossier Google Drive (via Apps Script) */
 'use strict';
 
-const APP_VERSION = '2.0.2';
+const APP_VERSION = '2.1.0';
 
 /* ================================ Stockage local ================================ */
 const LS = {
@@ -236,6 +236,11 @@ function normQ(q, ctx, db, label, isSub) {
     }
   }
   if (type !== 'situation' && !it.text) err('énoncé (« question ») manquant');
+  if (type !== 'situation') {
+    // Format attendu : indice (seconde chance), explication et astuce de pro pour chaque question
+    const miss = [['indice', it.indice], ['explication', it.explication], ['astuce', it.astuce]].filter(([, v]) => !v).map(([k]) => k);
+    if (miss.length) warn(`${miss.join(', ')} manquant${miss.length > 1 ? 's' : ''}`);
+  }
   if (bad) return { issues };
   it.points = type === 'situation' ? it.subs.length : 1;
   return { item: it, issues };
@@ -1167,7 +1172,7 @@ function feedback(step, a, Q, past) {
     <h3>${a.ok ? ic('check') : ic('x')} ${title}</h3>
     ${showAnswer ? `<p class="answer-line">Bonne réponse : <strong>${answerText(it)}</strong></p>` : ''}
     ${it.explication ? `<p class="expl">${fmt(it.explication)}</p>` : ''}
-    ${it.astuce ? `<div class="tip">${ic('spark')}<div><small>Astuce</small><span>${fmt(it.astuce)}</span></div></div>` : ''}
+    ${it.astuce ? `<div class="tip">${ic('spark')}<div><small>Astuce de pro</small><span>${fmt(it.astuce)}</span></div></div>` : ''}
     <div class="fb-foot">
       ${it.page ? `<span class="chip">${ic('book')} Page ${esc(it.page)}</span>` : '<span></span>'}
       ${past
