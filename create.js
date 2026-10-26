@@ -47,6 +47,7 @@ async function toJpeg(dataUrl, max = 1024, quality = 0.88) {
 function friendlyGeminiError(status, msg) {
   const m = String(msg || '');
   if (/API key not valid|API_KEY_INVALID/i.test(m)) return 'Clé API Gemini invalide (Réglages › Mode parent).';
+  if (status === 402 || /prepayment credits are depleted/i.test(m)) return 'Crédit prépayé Gemini épuisé : recharge-le dans AI Studio › Facturation (ou active la recharge automatique).';
   if (status === 429 || /quota|RESOURCE_EXHAUSTED/i.test(m)) return /PerDay|per day|daily/i.test(m) ? 'Quota quotidien Gemini atteint (clé gratuite). Réessaie demain ou active la facturation.' : 'Limite de débit Gemini atteinte. Les illustrations demandent une clé payante.';
   if (status === 404) return `Modèle introuvable (${m.slice(0, 120)}). Réglages › Mode parent › Tester pour le mettre à jour.`;
   if (status === 403) return 'Accès refusé par Gemini : ' + m.slice(0, 160);
@@ -213,7 +214,7 @@ const QUESTION_SCHEMA = {
 };
 const MISSION_SCHEMA = {
   type: 'OBJECT',
-  properties: { theme: { type: 'STRING' }, source: { type: 'STRING' }, questions: { type: 'ARRAY', items: QUESTION_SCHEMA } },
+  properties: { matiere: { type: 'STRING' }, theme: { type: 'STRING' }, source: { type: 'STRING' }, questions: { type: 'ARRAY', items: QUESTION_SCHEMA } },
   required: ['questions'],
 };
 
@@ -232,15 +233,34 @@ const DEFAULT_MIX = 'environ 40 % qcm, 15 % vrai_faux, 15 % choix_multiples, 15 
  */
 const visualQuota = (n, illus) => ({ figure: Math.ceil(n / 3), svg: Math.ceil(n / 8), illustration: illus ? Math.ceil(n / 5) : 0 });
 
+/* Matières proposées (en plus de celles déjà présentes dans Drive) */
+const COMMON_MATIERES = ['Sciences', 'Mathématiques', 'Français', 'Anglais', 'Histoire', 'Géographie', 'Culture et citoyenneté québécoise', 'Arts plastiques', 'Musique', 'Éducation physique', 'Espagnol'];
+function matiereList() {
+  const have = S.db ? Object.keys(S.db.tree) : [];
+  return [...have.sort(sortAlpha), ...COMMON_MATIERES.filter((m) => !have.some((h) => loose(h) === loose(m)))];
+}
+/* Rattache la saisie à une matière existante (même nom aux accents/majuscules près) */
+function canonicalMatiere(m) {
+  const t = str(m);
+  if (!t) return '';
+  const have = S.db ? Object.keys(S.db.tree) : [];
+  return have.find((h) => loose(h) === loose(t)) || COMMON_MATIERES.find((h) => loose(h) === loose(t)) || t;
+}
+const majority = (vals) => {
+  const n = {};
+  vals.map(str).filter(Boolean).forEach((v) => { n[v] = (n[v] || 0) + 1; });
+  return Object.keys(n).sort((a, b) => n[b] - n[a])[0] || '';
+};
+
 function buildPrompt(C, matiere, B) {
   const theme = themeGiven(C);
-  const existing = S.db && S.db.tree[matiere] ? Object.keys(S.db.tree[matiere]) : [];
+  const existing = matiere && S.db && S.db.tree[matiere] ? Object.keys(S.db.tree[matiere]) : [];
   const q = visualQuota(B.n, C.illus);
   const photos = B.photos.map((i) => i + 1);
   return `Tu es un enseignant expérimenté qui prépare un élève à une évaluation. À partir des photos de pages de manuel ci-jointes, crée des questions de révision.
 
 PARAMÈTRES
-- Matière : ${matiere}
+- Matière : ${matiere || `non fournie : déduis-la des pages et renvoie-la dans « matiere », en choisissant si possible parmi : ${matiereList().join(', ')}`}
 - Thème : ${theme || 'non fourni : déduis-le des pages (titre du chapitre ou de la section, 2 à 6 mots) et renvoie-le dans « theme »'}${!theme && existing.length ? `. Thèmes existants dans cette matière : ${existing.map((t) => `« ${t} »`).join(', ')} ; si les pages correspondent à l'un d'eux, reprends exactement ce nom` : ''}
 - Niveau : ${S.parent.niveau || 'Secondaire 1 (Québec)'}
 - Photos fournies : ${photos.map((n) => `Photo ${n}`).join(', ')}${B.focus ? ` (${B.focus})` : ''}
@@ -276,7 +296,7 @@ ${q.illustration ? `3. « illustration » (au plus ${q.illustration}) : pour ren
 Pour tout visuel, « description » contient une phrase qui décrit l'image.
 
 Avant de répondre, vérifie : nombre exact de questions, réponses copiées exactement des options, indice/explication/astuce présents partout, aucune erreur scientifique.
-« source » : par exemple « Manuel, p. 112-118 ». « theme » : ${theme ? `« ${theme} »` : 'le thème déduit des pages'}.`;
+« source » : par exemple « Manuel, p. 112-118 ». « matiere » : ${matiere ? `« ${matiere} »` : 'la matière déduite des pages'}. « theme » : ${theme ? `« ${theme} »` : 'le thème déduit des pages'}.`;
 }
 
 /* Découpe la demande en lots générés EN PARALLÈLE (plus rapide, et un lot raté n'emporte pas tout) */
@@ -329,7 +349,8 @@ function parseMission(text) {
   try { const j = JSON.parse(text); if (j && Array.isArray(j.questions)) return { j, partial: false }; } catch (e) { /* */ }
   const themeM = text.match(/"theme"\s*:\s*"((?:[^"\\]|\\.)*)"/);
   const sourceM = text.match(/"source"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-  return { j: { theme: themeM ? JSON.parse(`"${themeM[1]}"`) : '', source: sourceM ? JSON.parse(`"${sourceM[1]}"`) : '', questions: salvageQuestions(text) }, partial: true };
+  const matM = text.match(/"matiere"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  return { j: { matiere: matM ? JSON.parse(`"${matM[1]}"`) : '', theme: themeM ? JSON.parse(`"${themeM[1]}"`) : '', source: sourceM ? JSON.parse(`"${sourceM[1]}"`) : '', questions: salvageQuestions(text) }, partial: true };
 }
 
 /* ================================ Génération ================================ */
@@ -342,6 +363,16 @@ function thinkingFor(model) {
   // Réflexion réduite : la rédaction de quiz n'a pas besoin d'un raisonnement long (gain de temps majeur)
   return versionOf(model) >= 3 ? { includeThoughts: true, thinkingLevel: 'low' } : { includeThoughts: true, thinkingBudget: 1024 };
 }
+
+/* Limiteur : les lots partent en parallèle, mais dès qu'une limite de débit (429) apparaît
+   (fréquent avec une clé gratuite), on passe à un lot à la fois pour ne pas aggraver la situation. */
+const Limiter = {
+  max: 4, active: 0, queue: [],
+  reset(n) { this.max = n; this.active = 0; this.queue = []; },
+  async acquire() { while (this.active >= this.max) await new Promise((r) => this.queue.push(r)); this.active++; },
+  release() { this.active = Math.max(0, this.active - 1); const next = this.queue.shift(); if (next) next(); },
+  throttle() { this.max = 1; },
+};
 
 async function runBatch(C, matiere, B, row) {
   const parts = [{ text: buildPrompt(C, matiere, B) }];
@@ -362,6 +393,8 @@ async function runBatch(C, matiere, B, row) {
     row.model = model;
     let schema = true, think = true;
     for (;;) {
+      status('wait', Limiter.active >= Limiter.max ? 'en attente (un lot à la fois)' : 'Gemini lit les pages…');
+      await Limiter.acquire();
       try {
         status('run', 'Gemini lit les pages…');
         return await geminiStream(model, body(schema, think, model), ({ text, thoughts }) => {
@@ -369,11 +402,12 @@ async function runBatch(C, matiere, B, row) {
           status('run', n ? `≈ ${n} / ${B.n} rédigées` : thoughts ? 'Gemini analyse les pages…' : 'Gemini lit les pages…');
         });
       } catch (e) {
+        if (e.status === 429 && Limiter.max > 1) { Limiter.throttle(); genLog(C, 'Limite de débit atteinte : passage à un lot à la fois'); }
         // Paramètre refusé par ce modèle : on le retire et on recommence
         if (e.status === 400 && think && /think|thought/i.test(e.raw || '')) { think = false; genLog(C, `${row.label} : ${model} refuse le réglage de réflexion, on le retire`); continue; }
         if (e.status === 400 && schema && /schema/i.test(e.raw || '')) { schema = false; genLog(C, `${row.label} : ${model} refuse le schéma JSON, on le retire`); continue; }
         throw e;
-      }
+      } finally { Limiter.release(); }
     }
   };
   try {
@@ -414,13 +448,15 @@ async function withFallback(C, models, call, onStatus) {
         return await call(models[m]);
       } catch (e) {
         last = e;
+        // Quota quotidien épuisé pour CE modèle : les autres modèles ont leur propre quota → on bascule tout de suite
+        if (e.status === 429 && e.daily && m + 1 < models.length) { genLog(C, `${models[m]} : quota quotidien épuisé`); break; }
         if (!isTransient(e)) throw e;
         if (attempt < waits.length) {
           const wait = e.retryAfter ? Math.min(60, Math.ceil(e.retryAfter) + 1) : waits[attempt];
           genLog(C, `${models[m]} : ${e.network ? 'connexion coupée' : `erreur ${e.status}`}, nouvel essai dans ${wait} s`);
           for (let t = wait; t > 0; t--) {
             if (S.create !== C) throw new Error('annulé');
-            onStatus(e.network ? `Connexion coupée, nouvel essai dans ${t} s` : e.status === 429 ? `Limite de débit, nouvel essai dans ${t} s` : `Gemini surchargé, nouvel essai dans ${t} s`);
+            onStatus(e.network ? `Connexion coupée, nouvel essai dans ${t} s` : e.status === 429 ? `Limite de débit de la clé, nouvel essai dans ${t} s` : `Gemini surchargé, nouvel essai dans ${t} s`);
             await sleep(1000);
           }
         }
@@ -613,8 +649,7 @@ function setProgress(step, detail) {
 
 async function generateMission() {
   const C = S.create;
-  const matiere = (C.matiere === '__new' ? C.matiereNew : C.matiere).trim();
-  if (!matiere) { toast('Indique la matière.'); return; }
+  let matiere = canonicalMatiere(C.matiereNew);
   if (!C.photos.length) { toast('Ajoute au moins une photo.'); return; }
   const batches = planBatches(C);
   C.stage = 'gen'; C.error = ''; C.log = [];
@@ -626,11 +661,14 @@ async function generateMission() {
   render(); startTicker(); saveCreateState();
   await keepAwake(true);
   try {
-    // 1. Lots en parallèle
+    // 1. Lots en parallèle (ou un à la fois si la clé est limitée en débit)
+    Limiter.reset(batches.length);
     const results = await Promise.all(batches.map((B, i) => runBatch(C, matiere, B, C.progress.rows[i])));
     if (S.create !== C) return;
     const raws = results.filter(Boolean);
-    let theme = themeGiven(C) || (raws.find((r) => r.theme) || {}).theme || 'Général';
+    // Matière et thème : saisis par le parent, sinon le choix majoritaire des lots
+    if (!matiere) { matiere = canonicalMatiere(majority(raws.map((r) => r.matiere))) || 'Divers'; genLog(C, `Matière déduite : ${matiere}`); }
+    let theme = themeGiven(C) || majority(raws.map((r) => r.theme)) || 'Général';
     theme = String(theme).trim().slice(0, 80);
     const source = (raws.find((r) => r.source) || {}).source;
     const ids = makeIds(C, matiere);
@@ -793,7 +831,7 @@ function saveCreateState() {
     if (!C) { IDB.del('create'); return; }
     const D = C.draft;
     IDB.set('create', {
-      matiere: C.matiere, matiereNew: C.matiereNew, theme: C.theme, titre: C.titre, n: C.n, consignes: C.consignes, illus: C.illus, photos: C.photos, log: C.log || [],
+      matiereNew: C.matiereNew, theme: C.theme, titre: C.titre, n: C.n, consignes: C.consignes, illus: C.illus, photos: C.photos, log: C.log || [],
       draft: D ? { data: D.data, files: D.files, fileName: D.fileName, base: D.base, removed: [...D.removed], warnings: D.warnings, items: D.items, tasks: [] } : null,
       wasGenerating: C.stage === 'gen',
     });
@@ -802,6 +840,8 @@ function saveCreateState() {
 async function restoreCreateState() {
   const saved = await IDB.get('create');
   if (!saved) return null;
+  if (saved.matiere && saved.matiere !== '__new' && !saved.matiereNew) saved.matiereNew = saved.matiere;
+  delete saved.matiere;
   const C = Object.assign(newCreate(), saved, { stage: 'form', draft: null, progress: null, error: '' });
   if (saved.draft) { C.draft = Object.assign(saved.draft, { removed: new Set(saved.draft.removed || []) }); C.stage = 'preview'; }
   else if (saved.wasGenerating) C.error = 'La génération a été interrompue (app fermée). Tes photos sont conservées : relance-la.';
@@ -867,7 +907,7 @@ async function publishMission() {
 /* ================================ Vues ================================ */
 function newCreate() {
   const ms = S.db ? Object.keys(S.db.tree).sort(sortAlpha) : [];
-  return { matiere: ms[0] || '__new', matiereNew: '', theme: '', titre: '', n: 15, consignes: '', illus: !!S.parent.illus, photos: [], stage: 'form', progress: null, draft: null, error: '' };
+  return { matiereNew: ms.length === 1 ? ms[0] : '', theme: '', titre: '', n: 15, consignes: '', illus: !!S.parent.illus, photos: [], stage: 'form', progress: null, draft: null, error: '' };
 }
 
 function viewCreate() {
@@ -875,23 +915,19 @@ function viewCreate() {
   if (C.stage === 'gen' || C.stage === 'publish') return viewCreateProgress(C);
   if (C.stage === 'preview') return viewCreatePreview(C);
   const ms = S.db ? Object.keys(S.db.tree).sort(sortAlpha) : [];
-  const themes = C.matiere !== '__new' && S.db && S.db.tree[C.matiere] ? Object.keys(S.db.tree[C.matiere]).sort(sortAlpha) : [];
+  const mat = canonicalMatiere(C.matiereNew);
+  const themes = S.db && S.db.tree[mat] ? Object.keys(S.db.tree[mat]).sort(sortAlpha) : [];
   const seg = (k, val, items) => `<div class="seg">${items.map(([v, l]) => `<button class="${String(val) === String(v) ? 'on' : ''}" data-action="c-set" data-k="${k}" data-val="${v}">${l}</button>`).join('')}</div>`;
   return `${topbar('Créer une mission')}
   <section class="page create">
     ${C.error ? `<div class="sync error">${ic('alert')} ${esc(C.error)}</div>${logDetails(C)}` : ''}
     <div class="card form">
       <div class="card-head"><h3>1. Le sujet</h3>${C.photos.length || C.theme || C.titre ? '<button class="link" data-action="c-reset">Tout effacer</button>' : ''}</div>
-      <label>Matière
-        <select data-bind="matiere" data-rerender="1">
-          ${ms.map((m) => `<option value="${esc(m)}" ${C.matiere === m ? 'selected' : ''}>${esc(m)}</option>`).join('')}
-          <option value="__new" ${C.matiere === '__new' ? 'selected' : ''}>+ Nouvelle matière…</option>
-        </select>
-      </label>
-      ${C.matiere === '__new' ? `<label>Nom de la nouvelle matière<input id="c-mat" data-bind="matiereNew" type="text" placeholder="ex. Histoire" value="${esc(C.matiereNew)}"></label>` : ''}
-      <label>Thème (facultatif)<input id="c-theme" data-bind="theme" type="text" list="c-themes" placeholder="Laisse vide : Gemini le trouvera" value="${esc(C.theme)}"></label>
+      <label>Matière (facultatif)<input id="c-mat" data-bind="matiereNew" data-rerender-blur="1" type="text" list="c-mats" autocomplete="off" placeholder="Vide = Gemini la devine" value="${esc(C.matiereNew)}"></label>
+      <datalist id="c-mats">${matiereList().map((m) => `<option value="${esc(m)}">`).join('')}</datalist>
+      <label>Thème (facultatif)<input id="c-theme" data-bind="theme" type="text" list="c-themes" placeholder="Vide = Gemini le devine" value="${esc(C.theme)}"></label>
       <datalist id="c-themes">${themes.map((t) => `<option value="${esc(t)}">`).join('')}</datalist>
-      <label>Titre (facultatif)<input id="c-titre" data-bind="titre" type="text" placeholder="ex. Évaluation du 12 novembre" value="${esc(C.titre)}"></label>
+      <label>Titre (facultatif)<input id="c-titre" data-bind="titre" type="text" placeholder="ex. Évaluation du 12 nov." value="${esc(C.titre)}"></label>
     </div>
 
     <div class="card">
@@ -1024,7 +1060,7 @@ Object.assign(ACTIONS, {
   'c-photo-del': (d) => { S.create.photos.splice(Number(d.i), 1); render(); saveCreateState(); },
   'c-reset': () => { S.create = newCreate(); IDB.del('create'); render(); window.scrollTo(0, 0); },
   'c-generate': () => generateMission(),
-  'c-cancel-gen': () => { const C = S.create; S.create = Object.assign(newCreate(), { matiere: C.matiere, matiereNew: C.matiereNew, theme: C.theme, titre: C.titre, n: C.n, consignes: C.consignes, illus: C.illus, photos: C.photos }); stopTicker(); keepAwake(false); render(); saveCreateState(); },
+  'c-cancel-gen': () => { const C = S.create; S.create = Object.assign(newCreate(), { matiereNew: C.matiereNew, theme: C.theme, titre: C.titre, n: C.n, consignes: C.consignes, illus: C.illus, photos: C.photos }); stopTicker(); keepAwake(false); render(); saveCreateState(); },
   'c-toggle-q': (d) => { const D = S.create.draft, i = Number(d.i); if (D.removed.has(i)) D.removed.delete(i); else D.removed.add(i); render(); saveCreateState(); },
   'c-back-form': () => { const C = S.create; C.stage = 'form'; C.draft = null; C.error = ''; render(); saveCreateState(); window.scrollTo(0, 0); },
   'c-publish': () => publishMission(),
@@ -1061,7 +1097,7 @@ document.addEventListener('input', (e) => {
 });
 document.addEventListener('change', async (e) => {
   const sel = e.target.closest('[data-bind]');
-  if (sel && S.create && sel.dataset.rerender) { S.create[sel.dataset.bind] = sel.value; render(); return; }
+  if (sel && S.create && (sel.dataset.rerender || sel.dataset.rerenderBlur)) { S.create[sel.dataset.bind] = sel.value; render(); saveCreateState(); return; }
   const ps = e.target.closest('[data-bind-parent]');
   if (ps) { S.parent[ps.dataset.bindParent] = ps.value; saveParent(); render(); return; }
   const inp = e.target.closest('[data-change="c-photos"]');
