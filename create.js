@@ -66,12 +66,75 @@ async function geminiFetch(path, body, timeoutMs = 240000) {
       signal: ctrl.signal,
     });
   } catch (e) {
-    throw new Error(e.name === 'AbortError' ? 'Gemini met trop de temps à répondre. Réessaie avec moins de photos ou de questions.' : 'Connexion à Gemini impossible : ' + e.message);
+    throw networkError(e);
   } finally { clearTimeout(timer); }
   let j = null;
   try { j = await r.json(); } catch (e) { /* */ }
   if (!r.ok) { const err = new Error(friendlyGeminiError(r.status, j && j.error && j.error.message)); err.status = r.status; err.raw = j && j.error && j.error.message; throw err; }
   return j;
+}
+
+function networkError(e) {
+  if (e && e.status !== undefined) return e;
+  const err = new Error(e && e.name === 'AbortError'
+    ? 'Gemini met trop de temps à répondre. Réessaie avec moins de photos ou de questions.'
+    : 'La connexion à Gemini a été coupée (réseau instable, ou app mise en arrière-plan). Garde l\'app ouverte pendant la génération.');
+  err.status = 0; err.network = true;
+  return err;
+}
+
+/*
+ * Appel en streaming (SSE) : la réponse arrive au fil de l'eau, ce qui garde la connexion
+ * active sur le réseau mobile (pas de coupure pendant la minute de rédaction) et permet
+ * d'afficher la progression. Coupe si plus rien n'arrive pendant `idleMs`.
+ */
+async function geminiStream(model, body, onProgress, idleMs = 150000) {
+  const ctrl = new AbortController();
+  let idle = setTimeout(() => ctrl.abort(), idleMs);
+  const poke = () => { clearTimeout(idle); idle = setTimeout(() => ctrl.abort(), idleMs); };
+  try {
+    let r;
+    try {
+      r = await fetch(`${GEMINI}/models/${model}:streamGenerateContent?alt=sse`, {
+        method: 'POST',
+        headers: { 'x-goog-api-key': S.parent.geminiKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: ctrl.signal,
+      });
+    } catch (e) { throw networkError(e); }
+    if (!r.ok) {
+      let j = null;
+      try { j = await r.json(); } catch (e) { /* */ }
+      const msg = j && (Array.isArray(j) ? j[0] && j[0].error && j[0].error.message : j.error && j.error.message);
+      const err = new Error(friendlyGeminiError(r.status, msg)); err.status = r.status; err.raw = msg;
+      throw err;
+    }
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '', text = '', finish = '', thoughts = 0;
+    for (;;) {
+      let chunk;
+      try { chunk = await reader.read(); } catch (e) { throw networkError(e); }
+      if (chunk.done) break;
+      poke();
+      buf += dec.decode(chunk.value, { stream: true }).replace(/\r/g, '');
+      let cut;
+      while ((cut = buf.indexOf('\n\n')) >= 0) {
+        const ev = buf.slice(0, cut); buf = buf.slice(cut + 2);
+        ev.split('\n').forEach((line) => {
+          if (!line.startsWith('data:')) return;
+          let j;
+          try { j = JSON.parse(line.slice(5)); } catch (e) { return; }
+          if (j.error) { const err = new Error(friendlyGeminiError(j.error.code, j.error.message)); err.status = j.error.code; err.raw = j.error.message; throw err; }
+          const c = j.candidates && j.candidates[0];
+          ((c && c.content && c.content.parts) || []).forEach((p) => { if (p.thought) thoughts++; else if (p.text) text += p.text; });
+          if (c && c.finishReason) finish = c.finishReason;
+        });
+      }
+      onProgress && onProgress({ text, thoughts });
+    }
+    return { text, finish };
+  } finally { clearTimeout(idle); }
 }
 
 const versionOf = (name) => { const m = name.match(/gemini-(\d+(?:\.\d+)?)/); return m ? parseFloat(m[1]) : 0; };
@@ -195,23 +258,37 @@ async function geminiQuestions(C, matiere) {
     parts.push({ text: `Photo ${i + 1} :` });
     parts.push({ inline_data: { mime_type: 'image/jpeg', data: b64(p.dataUrl) } });
   });
-  const body = (schema) => ({
+  const body = (schema, thoughts) => ({
     contents: [{ role: 'user', parts }],
-    generationConfig: Object.assign({ responseMimeType: 'application/json', temperature: 0.7, maxOutputTokens: 32768 }, schema ? { responseSchema: MISSION_SCHEMA } : {}),
+    generationConfig: Object.assign(
+      { responseMimeType: 'application/json', temperature: 0.7, maxOutputTokens: 32768 },
+      schema ? { responseSchema: MISSION_SCHEMA } : {},
+      // Résumés de réflexion : du contenu arrive pendant que le modèle réfléchit (connexion maintenue)
+      thoughts ? { thinkingConfig: { includeThoughts: true } } : {}),
   });
+  const label = 'Gemini lit les pages et rédige les questions…';
+  const onProgress = ({ text, thoughts }) => {
+    const n = (text.match(/"question"\s*:/g) || []).length;
+    setProgress(n ? 'Gemini rédige les questions…' : label, n ? `≈ ${n} / ${C.n} questions rédigées` : thoughts ? 'Gemini analyse les pages…' : `${C.photos.length} photo(s) · ${C.n} questions · environ 1 minute`);
+  };
   const call = async (model) => {
     C.usedModel = model;
-    try { return await geminiFetch(`models/${model}:generateContent`, body(true)); }
-    catch (e) {
-      // Certains modèles refusent un schéma trop riche : on réessaie avec le JSON simple
-      if (e.status === 400 && /schema|response_schema|responseSchema/i.test(e.raw || '')) return geminiFetch(`models/${model}:generateContent`, body(false));
-      throw e;
+    let schema = true, thoughts = true;
+    for (let k = 0; k < 3; k++) {
+      try { return await geminiStream(model, body(schema, thoughts), onProgress); }
+      catch (e) {
+        // Paramètres refusés par ce modèle : on les retire et on recommence
+        if (e.status === 400 && thoughts && /think|thought/i.test(e.raw || '')) { thoughts = false; continue; }
+        if (e.status === 400 && schema && /schema/i.test(e.raw || '')) { schema = false; continue; }
+        throw e;
+      }
     }
+    return geminiStream(model, body(false, false), onProgress);
   };
-  const j = await withFallback(C, textModelChain(), call, 'Gemini lit les pages et rédige les questions…');
-  const cand = j.candidates && j.candidates[0];
-  const text = cand && cand.content && (cand.content.parts || []).map((p) => p.text || '').join('');
-  if (!text) throw new Error('Gemini n\'a pas renvoyé de questions' + (cand && cand.finishReason ? ` (${cand.finishReason})` : '') + '. Réessaie.');
+  const res = await withFallback(C, textModelChain(), call, label);
+  const text = res.text;
+  if (!text) throw new Error('Gemini n\'a pas renvoyé de questions' + (res.finish ? ` (${res.finish})` : '') + '. Réessaie.');
+  if (res.finish === 'MAX_TOKENS') throw new Error('La réponse de Gemini a été coupée (trop longue). Demande moins de questions ou mets moins de photos.');
   try { return JSON.parse(text); }
   catch (e) {
     const a = text.indexOf('{'), z = text.lastIndexOf('}');
@@ -221,7 +298,7 @@ async function geminiQuestions(C, matiere) {
 }
 
 /* ---------- Résilience : nouvel essai automatique, puis modèle de secours ---------- */
-const isTransient = (e) => [500, 502, 503, 504].includes(e.status) || (e.status === 429 && /high demand|overloaded|try again/i.test(e.raw || ''));
+const isTransient = (e) => e.network || [500, 502, 503, 504].includes(e.status) || (e.status === 429 && /high demand|overloaded|try again/i.test(e.raw || ''));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /* Modèle choisi, puis jusqu'à 2 autres modèles Flash disponibles (plus récent d'abord, « lite » en dernier) */
@@ -248,7 +325,7 @@ async function withFallback(C, models, call, label) {
         if (attempt < waits.length) {
           for (let t = waits[attempt]; t > 0; t--) {
             if (S.create !== C) throw new Error('annulé');
-            setProgress(label, `Gemini est surchargé (${models[m]}). Nouvel essai dans ${t} s…`);
+            setProgress(label, e.network ? `Connexion coupée. Nouvel essai dans ${t} s…` : `Gemini est surchargé (${models[m]}). Nouvel essai dans ${t} s…`);
             await sleep(1000);
           }
         }
@@ -371,6 +448,8 @@ async function generateMission() {
   C.stage = 'gen'; C.error = ''; C.progress = { step: '', detail: '', startedAt: Date.now() };
   setProgress('Gemini lit les pages et rédige les questions…', `${C.photos.length} photo(s) · ${C.n} questions · environ 1 minute`);
   startTicker();
+  saveCreateState();
+  await keepAwake(true);
   try {
     const raw = await geminiQuestions(C, matiere);
     if (S.create !== C) return;
@@ -401,8 +480,65 @@ async function generateMission() {
   } catch (e) {
     if (S.create !== C) return;
     C.stage = 'form'; C.error = e.message;
-  } finally { stopTicker(); }
+  } finally { stopTicker(); keepAwake(false); saveCreateState(); }
   if (S.view === 'create') { render(); window.scrollTo(0, 0); }
+}
+
+/* Empêche l'écran de se mettre en veille pendant la génération (Android, iOS 16.4+) */
+let wakeLock = null;
+async function keepAwake(on) {
+  try {
+    if (on && 'wakeLock' in navigator && !wakeLock) { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => { wakeLock = null; }); }
+    if (!on && wakeLock) { await wakeLock.release(); wakeLock = null; }
+  } catch (e) { /* non supporté : sans conséquence */ }
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && S.create && (S.create.stage === 'gen' || S.create.stage === 'publish')) keepAwake(true);
+});
+
+/* ---------- Sauvegarde du formulaire et de l'aperçu (survit à la fermeture de l'app) ---------- */
+const IDB = {
+  db: null,
+  open() {
+    if (this.db) return this.db;
+    this.db = new Promise((res, rej) => {
+      const r = indexedDB.open('mission-revision', 1);
+      r.onupgradeneeded = () => r.result.createObjectStore('kv');
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    });
+    return this.db;
+  },
+  async run(mode, fn) {
+    const db = await this.open();
+    return new Promise((res, rej) => { const tx = db.transaction('kv', mode); const q = fn(tx.objectStore('kv')); tx.oncomplete = () => res(q && q.result); tx.onerror = () => rej(tx.error); });
+  },
+  get(k) { return this.run('readonly', (st) => st.get(k)).catch(() => null); },
+  set(k, v) { return this.run('readwrite', (st) => st.put(v, k)).catch(() => null); },
+  del(k) { return this.run('readwrite', (st) => st.delete(k)).catch(() => null); },
+};
+let saveTimer = null;
+function saveCreateState() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    const C = S.create;
+    if (!C) { IDB.del('create'); return; }
+    const D = C.draft;
+    IDB.set('create', {
+      matiere: C.matiere, matiereNew: C.matiereNew, theme: C.theme, titre: C.titre, n: C.n, consignes: C.consignes, illus: C.illus, photos: C.photos,
+      draft: D ? { data: D.data, files: D.files, fileName: D.fileName, base: D.base, removed: [...D.removed], warnings: D.warnings, items: D.items, tasks: [] } : null,
+      wasGenerating: C.stage === 'gen',
+    });
+  }, 300);
+}
+async function restoreCreateState() {
+  const saved = await IDB.get('create');
+  if (!saved) return null;
+  const C = Object.assign(newCreate(), saved, { stage: 'form', draft: null, progress: null, error: '' });
+  if (saved.draft) { C.draft = Object.assign(saved.draft, { removed: new Set(saved.draft.removed || []) }); C.stage = 'preview'; }
+  else if (saved.wasGenerating) C.error = 'La génération a été interrompue (app fermée). Tes photos sont conservées : relance-la.';
+  delete C.wasGenerating;
+  return C;
 }
 
 let ticker = null;
@@ -430,6 +566,7 @@ async function publishMission() {
 
   C.stage = 'publish'; C.progress = { step: 'Publication dans Google Drive…', detail: '', startedAt: Date.now() };
   render();
+  await keepAwake(true);
   try {
     // Envois par lots (< ~3 Mo) : images d'abord, puis le fichier de questions
     let batch = [], size = 0, sent = 0;
@@ -446,13 +583,14 @@ async function publishMission() {
     await flush();
     await apiPost({ action: 'saveMission', admin: S.parent.adminCode, folder: data.matiere, name: D.fileName, content: JSON.stringify(data, null, 2) });
     const n = questions.reduce((a, q) => a + (q.type === 'situation' ? (q.questions || []).length : 1), 0);
-    S.create = null;
+    S.create = null; IDB.del('create'); keepAwake(false);
     S.sel[data.matiere + '|||' + data.theme] = true; LS.set('sel', S.sel);
     go('home', true);
     toast(`Mission publiée : ${plural(n, 'question')}`);
     setTimeout(() => showMascot('star', `Nouvelle mission « ${data.theme} » prête au décollage !`, { pos: 'bottom', ms: 3600 }), 400);
     syncCatalog();
   } catch (e) {
+    keepAwake(false);
     C.stage = 'preview'; C.error = 'Publication impossible : ' + e.message;
     render();
   }
@@ -475,7 +613,7 @@ function viewCreate() {
   <section class="page create">
     ${C.error ? `<div class="sync error">${ic('alert')} ${esc(C.error)}</div>` : ''}
     <div class="card form">
-      <h3>1. Le sujet</h3>
+      <div class="card-head"><h3>1. Le sujet</h3>${C.photos.length || C.theme || C.titre ? '<button class="link" data-action="c-reset">Tout effacer</button>' : ''}</div>
       <label>Matière
         <select data-bind="matiere" data-rerender="1">
           ${ms.map((m) => `<option value="${esc(m)}" ${C.matiere === m ? 'selected' : ''}>${esc(m)}</option>`).join('')}
@@ -591,19 +729,23 @@ function parentSettingsCard() {
 VIEWS.create = () => (S.create ? viewCreate() : viewHome());
 
 Object.assign(ACTIONS, {
-  'create-open': () => { if (!S.create || S.create.stage === 'publish') S.create = newCreate(); go('create'); },
+  'create-open': async () => {
+    if (!S.create) S.create = (await restoreCreateState()) || newCreate();
+    go('create');
+  },
   'c-set': (d) => {
     const C = S.create;
     let v = d.val;
     if (d.k === 'n') v = Number(v);
     if (d.k === 'illus') v = v === 'true';
-    C[d.k] = v; render();
+    C[d.k] = v; render(); saveCreateState();
   },
-  'c-photo-del': (d) => { S.create.photos.splice(Number(d.i), 1); render(); },
+  'c-photo-del': (d) => { S.create.photos.splice(Number(d.i), 1); render(); saveCreateState(); },
+  'c-reset': () => { S.create = newCreate(); IDB.del('create'); render(); window.scrollTo(0, 0); },
   'c-generate': () => generateMission(),
-  'c-cancel-gen': () => { const C = S.create; S.create = Object.assign(newCreate(), { matiere: C.matiere, matiereNew: C.matiereNew, theme: C.theme, titre: C.titre, n: C.n, consignes: C.consignes, illus: C.illus, photos: C.photos }); stopTicker(); render(); },
-  'c-toggle-q': (d) => { const D = S.create.draft, i = Number(d.i); if (D.removed.has(i)) D.removed.delete(i); else D.removed.add(i); render(); },
-  'c-back-form': () => { const C = S.create; C.stage = 'form'; C.draft = null; C.error = ''; render(); window.scrollTo(0, 0); },
+  'c-cancel-gen': () => { const C = S.create; S.create = Object.assign(newCreate(), { matiere: C.matiere, matiereNew: C.matiereNew, theme: C.theme, titre: C.titre, n: C.n, consignes: C.consignes, illus: C.illus, photos: C.photos }); stopTicker(); keepAwake(false); render(); saveCreateState(); },
+  'c-toggle-q': (d) => { const D = S.create.draft, i = Number(d.i); if (D.removed.has(i)) D.removed.delete(i); else D.removed.add(i); render(); saveCreateState(); },
+  'c-back-form': () => { const C = S.create; C.stage = 'form'; C.draft = null; C.error = ''; render(); saveCreateState(); window.scrollTo(0, 0); },
   'c-publish': () => publishMission(),
   'p-test': async () => {
     const P = S.parent;
@@ -633,6 +775,7 @@ document.addEventListener('input', (e) => {
   const el = e.target.closest('[data-bind]');
   if (!el || !S.create) return;
   S.create[el.dataset.bind] = el.value;
+  saveCreateState();
 });
 document.addEventListener('change', async (e) => {
   const sel = e.target.closest('[data-bind]');
@@ -650,5 +793,5 @@ document.addEventListener('change', async (e) => {
     catch (err) { toast('Photo illisible : ' + f.name); }
     if (S.view === 'create') render();
   }
-  C.adding = false; render();
+  C.adding = false; render(); saveCreateState();
 });

@@ -366,6 +366,8 @@ summary { cursor: pointer; font-size: 15px; }
 .prep-bar i { display: block; height: 100%; background: linear-gradient(90deg, var(--primary), #ec4899); transition: width .25s ease-out; }
 
 /* ---------- Création de missions (mode parent) ---------- */
+.card-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+.card-head .link { font-size: 14px; }
 .btn.create-btn { background: var(--surface); color: var(--primary); border: 2px dashed var(--primary-2); box-shadow: none; font-size: 17px; }
 .form select, .form textarea { min-height: 48px; padding: 10px 14px; border-radius: 12px; border: 2px solid var(--line); background: var(--surface-2); font-weight: 500; font-size: 16px; width: 100%; }
 .form textarea { resize: vertical; font-family: inherit; }
