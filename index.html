@@ -5,10 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Mission Révision</title>
   <meta name="description" content="Quiz de révision alimenté par un dossier Google Drive">
-  <meta name="theme-color" content="#4f46e5">
+  <meta name="theme-color" content="#f5f6fb" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0e1220" media="(prefers-color-scheme: dark)">
+  <script>
+    /* Applique le thème choisi avant l'affichage (évite un flash clair/sombre) */
+    try { var t = JSON.parse(localStorage.getItem('mr.theme')); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (e) {}
+  </script>
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Révision">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">

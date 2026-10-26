@@ -1,7 +1,7 @@
 /* Mission Révision — PWA de quiz alimentée par un dossier Google Drive (via Apps Script) */
 'use strict';
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 
 /* ================================ Stockage local ================================ */
 const LS = {
@@ -26,7 +26,26 @@ const S = {
   zoom: null,
   quitArm: false,
   toast: '',
+  theme: LS.get('theme', 'auto'),
 };
+
+/* ================================ Thème clair / sombre ================================ */
+const THEME_BG = { light: '#f5f6fb', dark: '#0e1220' };
+function applyTheme() {
+  const root = document.documentElement;
+  if (S.theme === 'light' || S.theme === 'dark') root.dataset.theme = S.theme;
+  else delete root.dataset.theme;
+  // Couleur de la barre du navigateur / de statut
+  document.querySelectorAll('meta[name="theme-color"]').forEach((m) => m.remove());
+  const add = (content, media) => {
+    const m = document.createElement('meta');
+    m.name = 'theme-color'; m.content = content;
+    if (media) m.media = media;
+    document.head.appendChild(m);
+  };
+  if (S.theme === 'light' || S.theme === 'dark') add(THEME_BG[S.theme]);
+  else { add(THEME_BG.light, '(prefers-color-scheme: light)'); add(THEME_BG.dark, '(prefers-color-scheme: dark)'); }
+}
 
 const app = document.getElementById('app');
 
@@ -71,6 +90,11 @@ const ICON = {
   copy: '<rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
   target: '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/>',
   image: '<rect width="18" height="18" x="3" y="3" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/>',
+  rocket: '<path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"/><path d="m12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"/><path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0"/><path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5"/>',
+  grip: '<circle cx="9" cy="6" r="1.2"/><circle cx="15" cy="6" r="1.2"/><circle cx="9" cy="12" r="1.2"/><circle cx="15" cy="12" r="1.2"/><circle cx="9" cy="18" r="1.2"/><circle cx="15" cy="18" r="1.2"/>',
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>',
+  moon: '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',
+  auto: '<rect width="14" height="20" x="5" y="2" rx="2"/><path d="M12 18h.01"/>',
 };
 const ic = (n, cls = '') => `<svg class="ic ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON[n]}</svg>`;
 
@@ -632,7 +656,7 @@ function viewHome() {
   return `
   <section class="home">
     <div class="hero">
-      <div class="logo">${ic('spark')}</div>
+      <div class="logo">${ic('rocket')}</div>
       <h1>Mission Révision</h1>
       <p class="muted">${db ? `${plural(db.total, 'question')} · ${plural(nSub, 'matière')}` : 'Chargement des questions…'}</p>
     </div>
@@ -792,10 +816,9 @@ function answersOrder(step, a) {
     }).join('')}</ol>
     ${a.ok ? '' : `<p class="label-sm">Le bon ordre :</p><ol class="order solution">${it.elements.map((x, i) => `<li><span class="num">${i + 1}</span><span class="grow">${fmt(x)}</span></li>`).join('')}</ol>`}`;
   }
-  return `<p class="hint-text">Utilise les flèches pour déplacer les éléments.</p>
-  <ol class="order">${a.order.map((x, i) => `<li><span class="num">${i + 1}</span><span class="grow">${fmt(x)}</span>
-    <span class="moves"><button class="icon-btn sm" data-action="move" data-i="${i}" data-d="-1" ${i === 0 ? 'disabled' : ''} aria-label="Monter">${ic('up')}</button>
-    <button class="icon-btn sm" data-action="move" data-i="${i}" data-d="1" ${i === a.order.length - 1 ? 'disabled' : ''} aria-label="Descendre">${ic('down')}</button></span></li>`).join('')}</ol>`;
+  return `<p class="hint-text">Fais glisser les éléments avec le doigt pour les remettre dans l'ordre.</p>
+  <ol class="order sortable">${a.order.map((x, i) => `<li data-i="${i}"><span class="num">${i + 1}</span><span class="grow">${fmt(x)}</span>
+    <span class="grip">${ic('grip')}</span></li>`).join('')}</ol>`;
 }
 
 function feedback(step, a, Q) {
@@ -901,8 +924,14 @@ function viewLibrary() {
 
 function viewSettings() {
   const link = S.cfg.api ? `${location.origin}${location.pathname}?api=${encodeURIComponent(S.cfg.api)}${S.cfg.key ? '&key=' + encodeURIComponent(S.cfg.key) : ''}` : '';
+  const themes = [['auto', 'Automatique', 'auto'], ['light', 'Clair', 'sun'], ['dark', 'Sombre', 'moon']];
   return `${topbar('Réglages')}
   <section class="page">
+    <div class="card">
+      <h3>Apparence</h3>
+      <div class="seg theme-seg" role="radiogroup">${themes.map(([v, l, i]) => `<button role="radio" aria-checked="${S.theme === v}" class="${S.theme === v ? 'on' : ''}" data-action="theme" data-val="${v}">${ic(i)} ${l}</button>`).join('')}</div>
+      <p class="hint-text">« Automatique » suit le réglage clair/sombre du téléphone.</p>
+    </div>
     <div class="card form">
       <h3>Connexion au dossier Google Drive</h3>
       <label>URL du script Google Apps Script<input id="f-api" type="url" inputmode="url" autocomplete="off" placeholder="https://script.google.com/macros/s/…/exec" value="${esc(S.cfg.api)}"></label>
@@ -977,6 +1006,7 @@ const ACTIONS = {
     else if (d.k === 'n' && v !== 'all') v = Number(v);
     S.opts[d.k] = v; LS.set('opts', S.opts); render();
   },
+  theme: (d) => { S.theme = d.val; LS.set('theme', S.theme); applyTheme(); render(); },
   launch: () => launchFromSetup(),
   'review-all': () => launchReviewAll(),
   choose: (d) => {
@@ -989,12 +1019,6 @@ const ACTIONS = {
   toggle: (d) => {
     const a = S.quiz.a; if (a.done) return;
     a.sel = a.sel.includes(d.o) ? a.sel.filter((x) => x !== d.o) : a.sel.concat(d.o);
-    render();
-  },
-  move: (d) => {
-    const a = S.quiz.a, i = Number(d.i), j = i + Number(d.d);
-    if (a.done || j < 0 || j >= a.order.length) return;
-    [a.order[i], a.order[j]] = [a.order[j], a.order[i]];
     render();
   },
   validate: () => {
@@ -1060,10 +1084,89 @@ document.addEventListener('change', (e) => {
   render();
 });
 
+/* ================================ Glisser-déposer (questions « ordre ») ================================ */
+let drag = null;
+
+document.addEventListener('pointerdown', (e) => {
+  const li = e.target.closest('.order.sortable li');
+  if (!li || drag || !S.quiz || S.quiz.a.done) return;
+  if (e.pointerType === 'mouse' && e.button !== 0) return;
+  const items = [...li.parentElement.children];
+  const rects = items.map((el) => el.getBoundingClientRect());
+  const from = items.indexOf(li);
+  const gap = rects.length > 1 ? rects[1].top - rects[0].bottom : 8;
+  drag = {
+    li, items, from, to: from, id: e.pointerId, lastY: e.clientY,
+    startY: e.clientY + window.scrollY,
+    tops: rects.map((r) => r.top + window.scrollY),
+    hs: rects.map((r) => r.height),
+    step: rects[from].height + gap,
+  };
+  try { li.setPointerCapture(e.pointerId); } catch (err) { /* */ }
+  li.classList.add('dragging');
+  li.parentElement.classList.add('is-dragging');
+  if (navigator.vibrate) navigator.vibrate(8);
+  e.preventDefault();
+  requestAnimationFrame(autoScroll);
+});
+
+function dragMove(clientY) {
+  const d = drag;
+  d.lastY = clientY;
+  const dy = clientY + window.scrollY - d.startY;
+  d.li.style.transform = `translateY(${dy}px)`;
+  const center = d.tops[d.from] + d.hs[d.from] / 2 + dy;
+  // Position cible = nombre d'autres éléments dont le milieu est au-dessus du centre de l'élément tiré
+  let to = 0;
+  d.items.forEach((el, i) => { if (i !== d.from && d.tops[i] + d.hs[i] / 2 < center) to++; });
+  if (to !== d.to && navigator.vibrate) navigator.vibrate(4);
+  d.to = to;
+  d.items.forEach((el, i) => {
+    if (i === d.from) return;
+    let shift = 0;
+    if (i > d.from && i <= to) shift = -d.step;
+    if (i < d.from && i >= to) shift = d.step;
+    el.style.transform = shift ? `translateY(${shift}px)` : '';
+  });
+}
+
+function autoScroll() {
+  if (!drag) return;
+  const top = 100, bottom = window.innerHeight - 80;
+  let v = 0;
+  if (drag.lastY < top) v = -Math.min(14, (top - drag.lastY) / 4);
+  else if (drag.lastY > bottom) v = Math.min(14, (drag.lastY - bottom) / 4);
+  if (v) { window.scrollBy(0, v); dragMove(drag.lastY); }
+  requestAnimationFrame(autoScroll);
+}
+
+document.addEventListener('pointermove', (e) => {
+  if (!drag || e.pointerId !== drag.id) return;
+  e.preventDefault();
+  dragMove(e.clientY);
+}, { passive: false });
+
+function dragEnd(e) {
+  if (!drag || e.pointerId !== drag.id) return;
+  const { from, to } = drag;
+  drag = null;
+  const a = S.quiz && S.quiz.a;
+  if (a && !a.done && from !== to) {
+    const arr = a.order.slice();
+    const [x] = arr.splice(from, 1);
+    arr.splice(to, 0, x);
+    a.order = arr;
+  }
+  render();
+}
+document.addEventListener('pointerup', dragEnd);
+document.addEventListener('pointercancel', dragEnd);
+
 window.addEventListener('online', () => { flushPending(); });
 
 /* ================================ Démarrage ================================ */
 (function init() {
+  applyTheme();
   // Configuration par lien : ?api=…&key=…
   const p = new URLSearchParams(location.search);
   if (p.get('api')) {
