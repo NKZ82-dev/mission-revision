@@ -1,7 +1,7 @@
 /* Mission Révision — service worker (réseau d'abord, cache si hors ligne) */
-const CACHE = 'mr-shell-v5';
+const CACHE = 'mr-shell-v6';
 const SHELL = [
-  './', './index.html', './app.js', './styles.css', './manifest.webmanifest',
+  './', './index.html', './app.js', './create.js', './styles.css', './manifest.webmanifest',
   './icons/icon.svg', './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png',
   './exemples/demo.json', './exemples/sciences-masse-volume.json',
   './exemples/francais-classes-de-mots.json', './exemples/images/cube-arete-3cm.svg',

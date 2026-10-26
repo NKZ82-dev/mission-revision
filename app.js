@@ -1,7 +1,7 @@
 /* Mission Révision — PWA de quiz alimentée par un dossier Google Drive (via Apps Script) */
 'use strict';
 
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '2.0.0';
 
 /* ================================ Stockage local ================================ */
 const LS = {
@@ -27,7 +27,11 @@ const S = {
   quitArm: false,
   toast: '',
   theme: LS.get('theme', 'auto'),
+  // Mode parent (création de missions) : configuré seulement sur le téléphone du parent
+  parent: Object.assign({ geminiKey: '', adminCode: '', niveau: 'Secondaire 1 (Québec)', textModel: '', imageModel: '', illus: false, models: [] }, LS.get('parent', {})),
+  create: null,
 };
+const parentReady = () => !!(S.cfg.api && S.parent.geminiKey && S.parent.adminCode && S.parent.textModel);
 
 /* ================================ Thème clair / sombre ================================ */
 const THEME_BG = { light: '#f5f6fb', dark: '#0e1220' };
@@ -97,6 +101,11 @@ const ICON = {
   sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>',
   moon: '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',
   auto: '<rect width="14" height="20" x="5" y="2" rx="2"/><path d="M12 18h.01"/>',
+  camera: '<path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/>',
+  trash: '<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
+  plus: '<path d="M5 12h14"/><path d="M12 5v14"/>',
+  wand: '<path d="m21.64 3.64-1.28-1.28a1.21 1.21 0 0 0-1.72 0L2.36 18.64a1.21 1.21 0 0 0 0 1.72l1.28 1.28a1.2 1.2 0 0 0 1.72 0L21.64 5.36a1.2 1.2 0 0 0 0-1.72"/><path d="m14 7 3 3"/><path d="M5 6v4"/><path d="M19 14v4"/><path d="M10 2v2"/><path d="M7 8H3"/><path d="M21 16h-4"/><path d="M11 3H9"/>',
+  key: '<circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/>',
 };
 const ic = (n, cls = '') => `<svg class="ic ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON[n]}</svg>`;
 
@@ -984,6 +993,7 @@ function viewHome() {
     ${demo ? `<div class="banner">${ic('alert')}<div><strong>Mode démo.</strong> Ce sont des questions d'exemple. Connecte ton dossier Google Drive dans <button class="link" data-action="go" data-v="settings">Réglages</button>.</div></div>` : ''}
     ${syncLine()}
     <button class="btn primary xl" data-action="go" data-v="setup" ${db && db.total ? '' : 'disabled'}>${ic('play')} Nouvelle mission</button>
+    ${parentReady() ? `<button class="btn create-btn xl" data-action="create-open">${ic('camera')} Créer une mission à partir de photos</button>` : ''}
     ${review ? `<button class="btn warn-btn xl" data-action="review-all">${ic('target')} Revoir mes erreurs <span class="pill">${review}</span></button>` : ''}
     <nav class="tiles">
       <button class="tile" data-action="go" data-v="progress">${ic('chart')}<span>Progression</span></button>
@@ -1268,6 +1278,7 @@ function viewSettings() {
       <button class="btn primary block" data-action="save-cfg">${ic('check')} Tester et enregistrer</button>
       ${S.cfg.api ? `<button class="btn ghost block" data-action="demo">Revenir au mode démo</button>` : ''}
     </div>
+    ${S.cfg.api && typeof parentSettingsCard === 'function' ? parentSettingsCard() : ''}
     ${link ? `<div class="card">
       <h3>Lien d'installation</h3>
       <p class="small muted">Envoie ce lien sur le téléphone de l'élève : il ouvre l'app déjà connectée. Ensuite, « Partager › Sur l'écran d'accueil » (iPhone) ou « Installer l'application » (Android).</p>
@@ -1291,14 +1302,16 @@ const VIEWS = { prep: viewPrep, home: viewHome, setup: viewSetup, quiz: viewQuiz
 
 function render() {
   // Conserver la saisie en cours dans les réglages
-  const keep = S.view === 'settings' ? { api: valueOf('f-api'), key: valueOf('f-key') } : null;
+  // Conserver la saisie en cours (champs texte) quand on reste sur le même écran
+  const keep = {};
+  if (app.dataset.view === S.view) app.querySelectorAll('input[id]:not([type=file]):not([type=checkbox]), textarea[id]').forEach((el) => { keep[el.id] = el.value; });
   if ((S.view === 'quiz' && !S.quiz) || (S.view === 'results' && !S.last) || (S.view === 'prep' && !S.prep) || !VIEWS[S.view]) S.view = 'home';
   let html;
   if (S.view === 'settings') html = viewSettings();
   else if (!S.db) html = `<div class="boot">${S.sync.type === 'error' ? `<p>${esc(S.sync.msg)}</p><button class="btn primary" data-action="go" data-v="settings">Réglages</button>` : 'Chargement…'}</div>`;
   else html = VIEWS[S.view]();
   app.innerHTML = html + viewZoom() + (S.toast ? `<div class="toast">${esc(S.toast)}</div>` : '');
-  if (keep) { if (keep.api != null) setValue('f-api', keep.api); if (keep.key != null) setValue('f-key', keep.key); }
+  Object.keys(keep).forEach((id) => setValue(id, keep[id]));
   app.classList.toggle('enter', app.dataset.view !== S.view || !!S.enter);
   app.classList.toggle('flash', !!S.flash);
   S.enter = false; S.flash = false; S.bump = false;
