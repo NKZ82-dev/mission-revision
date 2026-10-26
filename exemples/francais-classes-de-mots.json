@@ -1,0 +1,49 @@
+{
+  "format": "mission-revision/1",
+  "matiere": "Français",
+  "theme": "Classes de mots",
+  "titre": "Exemple — classes de mots",
+  "niveau": "Secondaire 1",
+  "questions": [
+    {
+      "id": "fr-cm-001",
+      "type": "qcm",
+      "question": "Dans la phrase « Le petit chat dort », quelle est la classe du mot **petit** ?",
+      "options": ["Nom", "Adjectif", "Verbe", "Déterminant"],
+      "reponse": "Adjectif",
+      "indice": "Ce mot donne une précision sur le chat.",
+      "explication": "« Petit » précise le nom « chat » : c'est un adjectif."
+    },
+    {
+      "id": "fr-cm-002",
+      "type": "association",
+      "question": "Associe chaque mot de la phrase « Les élèves lisent rapidement » à sa classe.",
+      "paires": [
+        { "gauche": "Les", "droite": "Déterminant" },
+        { "gauche": "élèves", "droite": "Nom" },
+        { "gauche": "lisent", "droite": "Verbe" },
+        { "gauche": "rapidement", "droite": "Adverbe" }
+      ],
+      "indice": "Les mots qui finissent en « -ment » sont souvent des adverbes.",
+      "explication": "Les (déterminant) élèves (nom) lisent (verbe) rapidement (adverbe)."
+    },
+    {
+      "id": "fr-cm-003",
+      "type": "vrai_faux",
+      "question": "Un adverbe s'accorde toujours avec le nom qu'il accompagne.",
+      "reponse": false,
+      "indice": "« Rapidement » change-t-il au pluriel ?",
+      "explication": "L'adverbe est un mot invariable : il ne s'accorde jamais.",
+      "astuce": "Adverbe = invariable, comme une statue."
+    },
+    {
+      "id": "fr-cm-004",
+      "type": "choix_multiples",
+      "question": "Lesquels de ces mots sont des **déterminants** ?",
+      "options": ["le", "mon", "chien", "ces", "beau", "courir"],
+      "reponses": ["le", "mon", "ces"],
+      "indice": "Le déterminant se place devant le nom pour l'introduire.",
+      "explication": "Le, mon et ces sont des déterminants. Chien est un nom, beau un adjectif et courir un verbe."
+    }
+  ]
+}

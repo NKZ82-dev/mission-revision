@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 260 240" width="260" height="240">
+  <polygon points="60,90 170,90 170,200 60,200" fill="#bfdbfe" stroke="#1e3a8a" stroke-width="2.5"/>
+  <polygon points="60,90 110,45 220,45 170,90" fill="#dbeafe" stroke="#1e3a8a" stroke-width="2.5"/>
+  <polygon points="170,90 220,45 220,155 170,200" fill="#93c5fd" stroke="#1e3a8a" stroke-width="2.5"/>
+  <g font-family="Arial, sans-serif" font-size="18" font-weight="bold" fill="#0f172a">
+    <text x="95" y="225">3 cm</text>
+    <text x="198" y="190">3 cm</text>
+    <text x="10" y="150">3 cm</text>
+  </g>
+</svg>

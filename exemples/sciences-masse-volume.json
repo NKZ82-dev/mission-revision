@@ -1,0 +1,210 @@
+{
+  "format": "mission-revision/1",
+  "matiere": "Sciences",
+  "theme": "Masse et volume",
+  "titre": "Évaluation — propriétés de la matière",
+  "niveau": "Secondaire 1",
+  "source": "Manuel de sciences, p. 112-130",
+  "questions": [
+    {
+      "id": "sci-mv-001",
+      "type": "qcm",
+      "notion": "Volume",
+      "difficulte": 1,
+      "question": "Qu'est-ce que le **volume** d'un objet ?",
+      "options": [
+        "La quantité de matière qu'il contient",
+        "L'espace qu'il occupe en trois dimensions",
+        "La force avec laquelle la Terre l'attire",
+        "Sa température"
+      ],
+      "reponse": "L'espace qu'il occupe en trois dimensions",
+      "indice": "Pense à la place que prend un objet dans une boîte.",
+      "explication": "Le volume est l'espace occupé par un objet. Il se mesure en mL, en L ou en cm³.",
+      "astuce": "Volume = Vaste Espace en 3D.",
+      "page": "124"
+    },
+    {
+      "id": "sci-mv-002",
+      "type": "qcm",
+      "notion": "Masse",
+      "difficulte": 1,
+      "question": "Comment définit-on la **masse** d'un objet ?",
+      "options": [
+        "Son poids sur la Terre",
+        "L'espace qu'il occupe",
+        "La quantité de matière qu'il contient",
+        "Sa température"
+      ],
+      "reponse": "La quantité de matière qu'il contient",
+      "indice": "C'est ce dont l'objet est fait, ses particules.",
+      "explication": "La masse mesure la quantité de matière d'un objet. Elle se mesure en grammes (g) ou en kilogrammes (kg) avec une balance.",
+      "astuce": "MAsse = MAtière : les deux commencent par « Ma ».",
+      "page": "117"
+    },
+    {
+      "id": "sci-mv-003",
+      "type": "vrai_faux",
+      "notion": "Masse",
+      "difficulte": 2,
+      "question": "Un astronaute emporte une pomme sur la Lune. La **masse** de la pomme est plus petite sur la Lune.",
+      "reponse": false,
+      "indice": "La pomme a-t-elle perdu des morceaux pendant le voyage ?",
+      "explication": "La masse ne change pas : la pomme contient la même quantité de matière. C'est son **poids** (la force d'attraction) qui diminue sur la Lune.",
+      "astuce": "La masse voyage sans bouger ; le poids dépend de la planète.",
+      "page": "118"
+    },
+    {
+      "id": "sci-mv-004",
+      "type": "choix_multiples",
+      "notion": "Unités",
+      "difficulte": 1,
+      "question": "Lesquelles de ces unités servent à mesurer un **volume** ?",
+      "options": ["mL", "cm³", "kg", "L", "g", "°C"],
+      "reponses": ["mL", "cm³", "L"],
+      "indice": "Il y en a trois. Cherche celles qu'on voit sur une bouteille ou un cube.",
+      "explication": "Le mL, le L et le cm³ mesurent des volumes. Le g et le kg mesurent des masses, et le °C mesure la température.",
+      "page": "125"
+    },
+    {
+      "id": "sci-mv-005",
+      "type": "association",
+      "notion": "Mesure",
+      "difficulte": 1,
+      "question": "Associe chaque grandeur à l'instrument qui sert à la mesurer.",
+      "paires": [
+        { "gauche": "Masse", "droite": "Balance" },
+        { "gauche": "Volume d'un liquide", "droite": "Cylindre gradué" },
+        { "gauche": "Température", "droite": "Thermomètre" },
+        { "gauche": "Longueur", "droite": "Règle" }
+      ],
+      "indice": "Le cylindre gradué ressemble à un grand verre avec des traits.",
+      "explication": "Balance → masse ; cylindre gradué → volume d'un liquide ; thermomètre → température ; règle → longueur.",
+      "page": "120"
+    },
+    {
+      "id": "sci-mv-006",
+      "type": "association",
+      "notion": "Unités",
+      "difficulte": 2,
+      "question": "Associe chaque mesure à son équivalent.",
+      "paires": [
+        { "gauche": "1 mL", "droite": "1 cm³" },
+        { "gauche": "1 L", "droite": "1 000 mL" },
+        { "gauche": "1 kg", "droite": "1 000 g" },
+        { "gauche": "1 m³", "droite": "1 000 L" }
+      ],
+      "indice": "Trois des réponses contiennent « 1 000 ». Une seule est un échange 1 pour 1.",
+      "explication": "1 mL = 1 cm³ ; 1 L = 1 000 mL ; 1 kg = 1 000 g ; 1 m³ = 1 000 L.",
+      "astuce": "« Kilo » veut toujours dire 1 000.",
+      "page": "126"
+    },
+    {
+      "id": "sci-mv-007",
+      "type": "ordre",
+      "notion": "Unités",
+      "difficulte": 2,
+      "question": "Place ces volumes du **plus petit** au **plus grand**.",
+      "elements": ["5 mL", "0,5 L", "750 mL", "2 L"],
+      "indice": "Convertis tout en mL : 0,5 L = 500 mL.",
+      "explication": "5 mL < 0,5 L (500 mL) < 750 mL < 2 L (2 000 mL).",
+      "page": "126"
+    },
+    {
+      "id": "sci-mv-008",
+      "type": "qcm",
+      "notion": "Mesure",
+      "difficulte": 2,
+      "question": "Quel volume d'eau indique ce cylindre gradué ?",
+      "svg": "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 300' width='200' height='300'><rect x='60' y='20' width='60' height='255' rx='4' fill='#f8fafc' stroke='#334155' stroke-width='2'/><path d='M62 96 Q90 108 118 96 L118 273 L62 273 Z' fill='#93c5fd'/><g stroke='#334155' stroke-width='1.5'><line x1='60' y1='270' x2='82' y2='270'/><line x1='60' y1='246' x2='72' y2='246'/><line x1='60' y1='222' x2='82' y2='222'/><line x1='60' y1='198' x2='72' y2='198'/><line x1='60' y1='174' x2='82' y2='174'/><line x1='60' y1='150' x2='72' y2='150'/><line x1='60' y1='126' x2='82' y2='126'/><line x1='60' y1='102' x2='72' y2='102'/><line x1='60' y1='78' x2='82' y2='78'/><line x1='60' y1='54' x2='72' y2='54'/><line x1='60' y1='30' x2='82' y2='30'/></g><g font-family='Arial' font-size='14' fill='#334155'><text x='128' y='275'>0</text><text x='128' y='227'>10</text><text x='128' y='179'>20</text><text x='128' y='131'>30</text><text x='128' y='83'>40</text><text x='128' y='35'>50</text><text x='20' y='16'>mL</text></g></svg>",
+      "image_alt": "Cylindre gradué de 0 à 50 mL contenant de l'eau",
+      "options": ["30 mL", "35 mL", "37 mL", "40 mL"],
+      "reponse": "35 mL",
+      "indice": "Chaque petit trait vaut 5 mL. Lis le **bas** de la courbe de l'eau (le ménisque).",
+      "explication": "Le bas du ménisque est vis-à-vis du petit trait entre 30 et 40 : le volume est de 35 mL.",
+      "astuce": "Ménisque : on lit en bas, les yeux à la hauteur de l'eau.",
+      "page": "127"
+    },
+    {
+      "id": "sci-mv-009",
+      "type": "qcm",
+      "notion": "Volume",
+      "difficulte": 2,
+      "question": "Quel est le volume de ce cube ?",
+      "image": "cube-arete-3cm.svg",
+      "image_alt": "Cube dont chaque arête mesure 3 cm",
+      "options": ["9 cm³", "18 cm³", "27 cm³", "81 cm³"],
+      "reponse": "27 cm³",
+      "indice": "Volume d'un cube = arête × arête × arête.",
+      "explication": "V = 3 cm × 3 cm × 3 cm = 27 cm³.",
+      "astuce": "Cube → on multiplie **trois** fois (d'où le petit ³).",
+      "page": "128"
+    },
+    {
+      "id": "sci-mv-010",
+      "type": "situation",
+      "notion": "Mesure",
+      "difficulte": 3,
+      "titre": "La roche mystère",
+      "contexte": "Léa veut connaître le volume d'une petite roche de forme irrégulière. Elle verse **40 mL** d'eau dans un cylindre gradué, puis elle y plonge doucement la roche. Le niveau de l'eau monte jusqu'à **55 mL**.",
+      "page": "129",
+      "questions": [
+        {
+          "id": "sci-mv-010a",
+          "type": "qcm",
+          "question": "Quel est le volume de la roche ?",
+          "options": ["15 mL", "40 mL", "55 mL", "95 mL"],
+          "reponse": "15 mL",
+          "indice": "La roche prend la place de l'eau : de combien le niveau est-il monté ?",
+          "explication": "Volume de la roche = 55 mL − 40 mL = 15 mL.",
+          "astuce": "Volume final − volume initial = volume de l'objet."
+        },
+        {
+          "id": "sci-mv-010b",
+          "type": "vrai_faux",
+          "question": "Léa aurait pu trouver ce volume plus facilement avec une règle.",
+          "reponse": false,
+          "indice": "Peut-on mesurer les côtés d'une forme irrégulière ?",
+          "explication": "La règle fonctionne pour les formes régulières (cube, prisme). Pour une forme irrégulière, on utilise le déplacement d'eau."
+        },
+        {
+          "id": "sci-mv-010c",
+          "type": "ordre",
+          "question": "Remets dans l'ordre les étapes de la méthode de Léa.",
+          "elements": [
+            "Verser de l'eau dans le cylindre gradué",
+            "Lire le volume initial",
+            "Plonger la roche dans l'eau",
+            "Lire le volume final",
+            "Soustraire le volume initial du volume final"
+          ],
+          "indice": "On ne peut pas soustraire avant d'avoir lu les deux volumes.",
+          "explication": "Eau → lecture initiale → on plonge la roche → lecture finale → soustraction."
+        }
+      ]
+    },
+    {
+      "id": "sci-mv-011",
+      "type": "vrai_faux",
+      "notion": "Unités",
+      "difficulte": 1,
+      "question": "1 mL est équivalent à 1 cm³.",
+      "reponse": true,
+      "indice": "Un petit cube de 1 cm de côté rempli d'eau…",
+      "explication": "Oui : un cube de 1 cm × 1 cm × 1 cm contient exactement 1 mL.",
+      "page": "126"
+    },
+    {
+      "id": "sci-mv-012",
+      "type": "qcm",
+      "notion": "Masse",
+      "difficulte": 2,
+      "question": "On coupe une barre de pâte à modeler de 200 g en deux morceaux. Quelle est la masse totale des deux morceaux ?",
+      "options": ["100 g", "200 g", "400 g", "Impossible à savoir"],
+      "reponse": "200 g",
+      "indice": "A-t-on ajouté ou enlevé de la pâte ?",
+      "explication": "Couper un objet ne change pas la quantité de matière : la masse totale reste 200 g.",
+      "page": "118"
+    }
+  ]
+}
