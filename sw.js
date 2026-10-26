@@ -1,5 +1,5 @@
 /* Mission Révision — service worker (réseau d'abord, cache si hors ligne) */
-const CACHE = 'mr-shell-v13';
+const CACHE = 'mr-shell-v14';
 const SHELL = [
   './', './index.html', './app.js', './create.js', './styles.css', './manifest.webmanifest',
   './icons/icon.svg', './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png',

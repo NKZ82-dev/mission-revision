@@ -1,7 +1,7 @@
 /* Mission Révision — PWA de quiz alimentée par un dossier Google Drive (via Apps Script) */
 'use strict';
 
-const APP_VERSION = '2.1.4';
+const APP_VERSION = '2.2.0';
 
 /* ================================ Stockage local ================================ */
 const LS = {

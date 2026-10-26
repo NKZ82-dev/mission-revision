@@ -219,7 +219,8 @@ const Q_PROPS = {
   visuel: VISUEL_SCHEMA,
 };
 // Indice, explication et astuce sont OBLIGATOIRES : le schéma l'impose au modèle
-const REQUIRED = ['type', 'notion', 'difficulte', 'question', 'indice', 'explication', 'astuce', 'visuel'];
+// Les champs de réponse sont aussi obligatoires (vides s'ils ne concernent pas le type) : sinon le modèle les « oublie » parfois
+const REQUIRED = ['type', 'notion', 'difficulte', 'question', 'options', 'reponse', 'reponse_vrai', 'reponses', 'paires', 'elements', 'indice', 'explication', 'astuce', 'visuel'];
 const SUB_SCHEMA = { type: 'OBJECT', properties: Q_PROPS, required: REQUIRED };
 const QUESTION_SCHEMA = {
   type: 'OBJECT',
@@ -229,7 +230,7 @@ const QUESTION_SCHEMA = {
     contexte: { type: 'STRING' },
     sous_questions: { type: 'ARRAY', items: SUB_SCHEMA },
   }),
-  required: ['type', 'question', 'visuel'],
+  required: ['type', 'question', 'options', 'reponse', 'reponse_vrai', 'reponses', 'paires', 'elements', 'visuel'],
 };
 const MISSION_SCHEMA = {
   type: 'OBJECT',
@@ -263,7 +264,9 @@ function canonicalMatiere(m) {
   const t = str(m);
   if (!t) return '';
   const have = S.db ? Object.keys(S.db.tree) : [];
-  return have.find((h) => loose(h) === loose(t)) || COMMON_MATIERES.find((h) => loose(h) === loose(t)) || t;
+  const key = (x) => loose(x).replace(/s\b/g, ''); // « Science » = « Sciences », « Math » ≈ « Maths »
+  const same = (h) => key(h) === key(t) || (key(t).length >= 4 && key(h).startsWith(key(t)));
+  return have.find(same) || COMMON_MATIERES.find(same) || t;
 }
 const majority = (vals) => {
   const n = {};
@@ -288,19 +291,20 @@ PARAMÈTRES
 - Mises en situation : ${B.situations ? `exactement ${B.situations} (type « situation », 2 ou 3 sous_questions chacune)` : 'aucune'}.
 ${C.consignes ? `- Consignes du parent : ${C.consignes}\n` : ''}${B.avoid && B.avoid.length ? `- Ces questions existent déjà, n'en crée pas de semblables : ${B.avoid.map((t) => `« ${t} »`).join(' ; ')}\n` : ''}
 CONTENU
-1. Utilise UNIQUEMENT le contenu des photos fournies et couvre toutes leurs notions importantes.
-2. Français du Québec, phrases courtes et claires adaptées au niveau. Tutoie l'élève.
-3. Difficulté : ~30 % faciles (1), ~50 % moyennes (2), ~20 % difficiles (3) qui demandent d'appliquer ou de raisonner.
-4. Distracteurs plausibles (erreurs fréquentes, confusions entre notions voisines, mauvaises unités). Jamais « toutes ces réponses » ni « aucune de ces réponses ». Options de longueur semblable.
-5. CHAQUE question et CHAQUE sous-question a OBLIGATOIREMENT, non vides :
-   - « indice » : une piste qui fait réfléchir sans donner ni éliminer la réponse ;
+1. Pars du contenu des photos et couvre toutes leurs notions importantes. Si une notion est seulement annoncée (titre, objectif d'apprentissage, encadré) sans être expliquée, utilise sa définition standard du programme de ce niveau. Ne sors pas du sujet des pages.
+2. Les questions portent sur les NOTIONS (définitions, propriétés, exemples, applications, raisonnement), JAMAIS sur la page elle-même : pas de question sur la mise en page, la position ou l'ordre d'un texte, un titre, un numéro de section, un encadré, une liste d'objectifs ou « ce qu'on voit sur la photo ». L'élève répondra SANS le manuel : n'écris jamais « selon le texte », « sur la page », « dans l'encadré », « d'après la photo », ni dans la question, ni dans l'indice, ni dans l'astuce.
+3. Français du Québec, phrases courtes et claires adaptées au niveau. Tutoie l'élève.
+4. Difficulté : ~30 % faciles (1), ~50 % moyennes (2), ~20 % difficiles (3) qui demandent d'appliquer ou de raisonner.
+5. Distracteurs plausibles (erreurs fréquentes, confusions entre notions voisines, mauvaises unités). Jamais « toutes ces réponses » ni « aucune de ces réponses ». Options de longueur semblable.
+6. CHAQUE question et CHAQUE sous-question a OBLIGATOIREMENT, non vides :
+   - « indice » : une piste sur la NOTION (pas sur la page) qui fait réfléchir sans donner ni éliminer la réponse ;
    - « explication » : 1 à 2 phrases sur le POURQUOI de la bonne réponse ;
    - « astuce » : l'« astuce de pro », un moyen mnémotechnique, une règle simple ou un truc pour ne plus se tromper (1 phrase courte).
    Pour une « situation » elle-même, mets ces trois champs à "" : ils vont dans ses sous_questions.
-6. « page » : numéro de page visible sur la photo ("" si illisible). « notion » : la sous-notion travaillée.
-7. Virgule décimale, symboles Unicode (cm³, H₂O, °C, ×, −). Mot clé en gras possible avec **double astérisque**.
+7. « page » : numéro de page visible sur la photo ("" si illisible). « notion » : la sous-notion travaillée.
+8. Virgule décimale, symboles Unicode (cm³, H₂O, °C, ×, −). Mot clé en gras possible avec **double astérisque**.
 
-FORMAT PAR TYPE
+FORMAT PAR TYPE (remplis TOUS les champs du schéma : ceux qui ne concernent pas le type valent [], "" ou false)
 - qcm : exactement 4 « options » ; « reponse » = copie EXACTE, caractère pour caractère, d'une option.
 - vrai_faux : « reponse_vrai » = true ou false. Équilibre vrais et faux.
 - choix_multiples : 5 ou 6 « options » ; « reponses » = 2 à 4 copies EXACTES d'options. Question commençant par « Lesquelles… » ou « Coche… ».
@@ -728,15 +732,15 @@ async function generateMission() {
     rejected.forEach((m) => genLog(C, '  ' + m));
 
     // 2. Complément automatique s'il en manque
-    const missing = C.n - total;
-    if (missing > 0) {
+    for (let round = 1; round <= 2 && C.n - total >= (round === 1 ? 1 : 3); round++) {
+      const missing = C.n - total;
       // Lots de complément de 8 questions max, en parallèle
       setProgress('Gemini complète les questions manquantes…', `${total} / ${C.n} prêtes`);
       const avoid = kept.map((q) => q.question || q.titre).filter(Boolean).slice(0, 40);
       const chunks = [];
       for (let left = missing; left > 0; left -= 8) chunks.push(Math.min(8, left));
       const extras = await Promise.all(chunks.map((n, k) => {
-        const row = { label: chunks.length > 1 ? `Complément ${k + 1}` : 'Complément', info: `${n} question(s) manquante(s)`, state: 'wait', msg: '' };
+        const row = { label: `Complément${round > 1 ? ' (2e passe)' : ''}${chunks.length > 1 ? ` ${k + 1}` : ''}`, info: `${n} question(s) manquante(s)`, state: 'wait', msg: '' };
         C.progress.rows.push(row);
         return runBatch(C, matiere, { n, photos: C.photos.map((_, i) => i), types: DEFAULT_MIX, situations: 0, focus: 'toutes les pages', avoid }, row);
       }));
@@ -968,6 +972,7 @@ function viewCreate() {
         ${C.photos.length < MAX_PHOTOS ? `<label class="photo add">${C.adding ? `<span class="spin">${ic('sync')}</span>` : ic('camera')}<span>${C.photos.length ? 'Ajouter' : 'Prendre ou choisir des photos'}</span><input class="file-hidden" type="file" accept="image/*" multiple data-change="c-photos"></label>` : ''}
       </div>
       <p class="hint-text">Une photo par page, bien droite et lisible. Jusqu'à ${MAX_PHOTOS} photos.</p>
+      ${C.photos.length && C.n / C.photos.length > 10 ? `<p class="hint-text amber-t">${plural(C.photos.length, 'page')} pour ${C.n} questions : les questions risquent d'être répétitives ou hors sujet. Compte environ 5 à 8 questions par page de contenu, ou ajoute les pages d'explications.</p>` : ''}
     </div>
 
     <div class="card form opts">
