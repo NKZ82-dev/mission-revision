@@ -1,7 +1,7 @@
 /* Mission Révision — PWA de quiz alimentée par un dossier Google Drive (via Apps Script) */
 'use strict';
 
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.3.0';
 
 /* ================================ Stockage local ================================ */
 const LS = {
@@ -525,16 +525,85 @@ function orderItems(pool, mode) {
 function startQuiz({ items, n, mode, onlyKeys, label }) {
   const steps = buildSteps(items, n, onlyKeys);
   if (!steps.length) { toast('Aucune question ne correspond à ta sélection.'); return; }
+  const a0 = freshAnswer(steps[0]);
   S.quiz = {
-    steps, i: 0, score: 0, second: 0, log: [], startedAt: Date.now(), mode, label,
+    steps, i: 0, vi: 0, score: 0, second: 0, log: [], mode, label,
     themes: [...new Set(steps.map((s) => s.item.matiere + ' › ' + s.item.theme))],
-    a: freshAnswer(steps[0]),
+    a: a0, answers: [a0],
     streak: 0, wrongStreak: 0,
   };
   S.quitArm = false;
-  go('quiz');
-  setTimeout(() => showMascot('happy', pick(MSG.start, 'start').replace('{n}', plural(steps.length, 'question'))), 350);
+  prepareAndLaunch(S.quiz);
 }
+
+/* Préchargement des images de la mission avant le décollage */
+function quizImageRefs(steps) {
+  const refs = [], seen = new Set();
+  steps.forEach((s) => [s.item.img, s.sit && s.sit.img].forEach((r) => {
+    if (!r || r.kind === 'missing' || r.kind === 'svg') return;
+    const k = r.kind === 'drive' && !r.url ? imgKey(r) : (r.src || r.url);
+    if (seen.has(k)) return;
+    seen.add(k); refs.push(r);
+  }));
+  return refs;
+}
+const decodeImg = (src) => new Promise((res) => {
+  const im = new Image();
+  im.onload = im.onerror = () => res();
+  im.src = src;
+  if (im.decode) im.decode().then(res, res);
+});
+const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('délai dépassé')), ms))]);
+
+async function preloadImages(refs, onProgress) {
+  let done = 0;
+  const queue = refs.slice();
+  const worker = async () => {
+    while (queue.length) {
+      const r = queue.shift();
+      try { const src = await withTimeout(loadImage(r), 25000); if (src) await withTimeout(decodeImg(src), 8000); } catch (e) { /* l'image sera signalée à l'affichage */ }
+      onProgress(++done, refs.length);
+    }
+  };
+  await Promise.all([worker(), worker(), worker()]);
+}
+
+async function prepareAndLaunch(Q) {
+  const refs = quizImageRefs(Q.steps);
+  const pending = refs.filter((r) => !(r.kind === 'drive' && !r.url && IMG_READY.has(imgKey(r))));
+  if (pending.length) {
+    S.prep = { done: 0, total: pending.length, quiz: Q, cancelled: false };
+    // L'écran de préparation n'apparaît que si le chargement prend plus d'un instant
+    const showTimer = setTimeout(() => { if (S.prep && S.prep.quiz === Q && !S.prep.cancelled) go('prep'); }, 250);
+    await preloadImages(pending, (done, total) => {
+      if (!S.prep || S.prep.quiz !== Q) return;
+      S.prep.done = done; S.prep.total = total;
+      if (S.view === 'prep') render();
+    });
+    clearTimeout(showTimer);
+    const cancelled = !S.prep || S.prep.quiz !== Q || S.prep.cancelled;
+    S.prep = null;
+    if (cancelled || S.quiz !== Q) return;
+  }
+  Q.startedAt = Date.now();
+  go('quiz', S.view === 'prep');
+  setTimeout(() => showMascot('happy', pick(MSG.start, 'start').replace('{n}', plural(Q.steps.length, 'question'))), 350);
+}
+
+function viewPrep() {
+  const p = S.prep || { done: 0, total: 1 };
+  const pct = Math.round(100 * p.done / Math.max(1, p.total));
+  return `<section class="page prep">
+    <div class="prep-rocket">${ic('rocket')}</div>
+    <h1>Préparation du décollage…</h1>
+    <p class="muted">Chargement des images : ${p.done} / ${p.total}</p>
+    <div class="prep-bar"><i style="width:${pct}%"></i></div>
+    <button class="btn ghost" data-action="cancel-prep">Annuler</button>
+  </section>`;
+}
+
+/* La question affichée est-elle la question en cours (et non une question précédente revue) ? */
+const atCurrent = () => S.quiz && S.quiz.vi === S.quiz.i;
 
 function freshAnswer(step) {
   return { tries: 0, done: false, ok: null, retry: false, failed: [], sel: [], pairs: {}, order: step.order0 ? step.order0.slice() : [], wrongInfo: '', title: '', hintTitle: '' };
@@ -870,6 +939,7 @@ function go(view, replace) {
 
 window.addEventListener('popstate', (e) => {
   if (S.zoom) { S.zoom = null; render(); return; }
+  if (S.prep) { S.prep.cancelled = true; S.prep = null; S.quiz = null; }
   if (S.view === 'quiz' && S.quiz && !S.quiz.finished) {
     try { history.pushState({ v: 'quiz' }, ''); } catch (err) { /* */ }
     S.quitArm = true; render(); return;
@@ -976,8 +1046,9 @@ function viewSetup() {
 }
 
 function viewQuiz() {
-  const Q = S.quiz, step = Q.steps[Q.i], it = step.item, a = Q.a;
-  const pct = Math.round(100 * (Q.i + (a.done ? 1 : 0)) / Q.steps.length);
+  const Q = S.quiz, vi = Q.vi, step = Q.steps[vi], it = step.item, a = Q.answers[vi];
+  const past = vi < Q.i;
+  const pct = Math.round(100 * (Q.i + (Q.a.done ? 1 : 0)) / Q.steps.length);
   const sit = step.sit;
   const multiInput = ['choix_multiples', 'association', 'ordre'].includes(it.type);
 
@@ -994,11 +1065,16 @@ function viewQuiz() {
     <div class="progress"><i style="width:${pct}%"></i></div>
     <div class="quiz-bar">
       <button class="icon-btn ${S.quitArm ? 'armed' : ''}" data-action="quit" aria-label="Quitter">${S.quitArm ? '<span class="quit-txt">Quitter ?</span>' : ic('x')}</button>
-      <span class="chip">${Q.i + 1} / ${Q.steps.length}</span>
+      <span class="nav-group">
+        <button class="icon-btn sm nav" data-action="nav" data-d="-1" ${vi === 0 ? 'disabled' : ''} aria-label="Question précédente">${ic('left')}</button>
+        <span class="chip ${past ? 'past' : ''}">${vi + 1} / ${Q.steps.length}</span>
+        <button class="icon-btn sm nav" data-action="nav" data-d="1" ${vi >= Q.i ? 'disabled' : ''} aria-label="Question suivante">${ic('right')}</button>
+      </span>
       <span class="chip score${S.bump ? ' bump' : ''}">${ic('spark')} ${Q.score}</span>
     </div>
   </div>
   <section class="page quiz">
+    ${past ? `<div class="past-banner">${ic('retry')}<span>Tu revois une question déjà répondue.</span><button class="link" data-action="nav-current">Question en cours ${ic('right')}</button></div>` : ''}
     ${sit ? `<div class="card situation">
       <div class="sit-head">${ic('book')} Mise en situation${sit.titre ? ` — ${esc(sit.titre)}` : ''}<span class="chip small">${sit.idx}/${sit.total}</span></div>
       ${sit.contexte ? `<p>${fmt(sit.contexte)}</p>` : ''}
@@ -1012,7 +1088,7 @@ function viewQuiz() {
       ${body}
       ${multiInput && !a.done ? `<button class="btn primary block" data-action="validate" ${canValidate ? '' : 'disabled'}>${ic('check')} Valider</button>` : ''}
     </article>
-    ${a.done ? feedback(step, a, Q) : ''}
+    ${a.done ? feedback(step, a, Q, past) : ''}
   </section>`;
 }
 
@@ -1072,7 +1148,7 @@ function answersOrder(step, a) {
     <span class="grip">${ic('grip')}</span></li>`).join('')}</ol>`;
 }
 
-function feedback(step, a, Q) {
+function feedback(step, a, Q, past) {
   const it = step.item;
   const title = fmt(a.title || (a.ok ? 'Excellente réponse !' : 'Pas cette fois…'));
   const last = Q.i + 1 === Q.steps.length;
@@ -1084,7 +1160,9 @@ function feedback(step, a, Q) {
     ${it.astuce ? `<div class="tip">${ic('spark')}<div><small>Astuce</small><span>${fmt(it.astuce)}</span></div></div>` : ''}
     <div class="fb-foot">
       ${it.page ? `<span class="chip">${ic('book')} Page ${esc(it.page)}</span>` : '<span></span>'}
-      <button class="btn dark" data-action="next">${last ? 'Voir le bilan' : 'Suivante'} ${ic('right')}</button>
+      ${past
+        ? `<button class="btn dark" data-action="nav" data-d="1">${Q.vi + 1 === Q.i ? 'Question en cours' : 'Suivante'} ${ic('right')}</button>`
+        : `<button class="btn dark" data-action="next">${last ? 'Voir le bilan' : 'Suivante'} ${ic('right')}</button>`}
     </div>
   </div>`;
 }
@@ -1209,12 +1287,12 @@ function viewZoom() {
 }
 
 /* ================================ Rendu ================================ */
-const VIEWS = { home: viewHome, setup: viewSetup, quiz: viewQuiz, results: viewResults, progress: viewProgress, library: viewLibrary, settings: viewSettings };
+const VIEWS = { prep: viewPrep, home: viewHome, setup: viewSetup, quiz: viewQuiz, results: viewResults, progress: viewProgress, library: viewLibrary, settings: viewSettings };
 
 function render() {
   // Conserver la saisie en cours dans les réglages
   const keep = S.view === 'settings' ? { api: valueOf('f-api'), key: valueOf('f-key') } : null;
-  if ((S.view === 'quiz' && !S.quiz) || (S.view === 'results' && !S.last) || !VIEWS[S.view]) S.view = 'home';
+  if ((S.view === 'quiz' && !S.quiz) || (S.view === 'results' && !S.last) || (S.view === 'prep' && !S.prep) || !VIEWS[S.view]) S.view = 'home';
   let html;
   if (S.view === 'settings') html = viewSettings();
   else if (!S.db) html = `<div class="boot">${S.sync.type === 'error' ? `<p>${esc(S.sync.msg)}</p><button class="btn primary" data-action="go" data-v="settings">Réglages</button>` : 'Chargement…'}</div>`;
@@ -1262,6 +1340,7 @@ const ACTIONS = {
   launch: () => launchFromSetup(),
   'review-all': () => launchReviewAll(),
   choose: (d) => {
+    if (!atCurrent()) return;
     const Q = S.quiz, step = Q.steps[Q.i], a = Q.a, it = step.item;
     if (a.done || a.failed.includes(d.o)) return;
     const correct = it.type === 'vrai_faux' ? (it.answer ? 'Vrai' : 'Faux') : it.answer;
@@ -1269,24 +1348,37 @@ const ACTIONS = {
     submit(d.o === correct, '');
   },
   toggle: (d) => {
+    if (!atCurrent()) return;
     const a = S.quiz.a; if (a.done) return;
     a.sel = a.sel.includes(d.o) ? a.sel.filter((x) => x !== d.o) : a.sel.concat(d.o);
     render();
   },
   validate: () => {
+    if (!atCurrent()) return;
     const Q = S.quiz, r = evaluate(Q.steps[Q.i], Q.a);
     submit(r.ok, r.info);
   },
   next: () => {
     const Q = S.quiz;
+    if (!atCurrent()) return;
     if (Q.i + 1 >= Q.steps.length) { finishQuiz(); return; }
-    Q.i++; Q.a = freshAnswer(Q.steps[Q.i]); S.quitArm = false; S.enter = true;
+    Q.i++; Q.a = freshAnswer(Q.steps[Q.i]); Q.answers[Q.i] = Q.a; Q.vi = Q.i;
+    S.quitArm = false; S.enter = true;
     hideMascot();
     render(); window.scrollTo(0, 0);
     const n = Q.steps.length;
     if (Q.i === n - 1 && n >= 5 && chance(0.6)) setTimeout(() => showMascot('happy', pick(MSG.last, 'last')), 300);
     else if (n >= 8 && Q.i === Math.floor(n / 2) && chance(0.5)) setTimeout(() => showMascot('happy', pick(MSG.half, 'half')), 300);
   },
+  nav: (d) => {
+    const Q = S.quiz;
+    const vi = Math.max(0, Math.min(Q.i, Q.vi + Number(d.d)));
+    if (vi === Q.vi) return;
+    Q.vi = vi; S.enter = true; hideMascot(true);
+    render(); window.scrollTo(0, 0);
+  },
+  'nav-current': () => { const Q = S.quiz; if (Q.vi !== Q.i) { Q.vi = Q.i; S.enter = true; render(); window.scrollTo(0, 0); } },
+  'cancel-prep': () => { if (S.prep) S.prep.cancelled = true; S.prep = null; S.quiz = null; go('setup', true); },
   quit: () => {
     if (S.quitArm) { S.quiz = null; S.quitArm = false; go('home', true); return; }
     S.quitArm = true; render();
@@ -1331,7 +1423,7 @@ document.addEventListener('click', (e) => {
 
 document.addEventListener('change', (e) => {
   const el = e.target.closest('[data-change="pair"]');
-  if (!el || !S.quiz) return;
+  if (!el || !S.quiz || !atCurrent()) return;
   const a = S.quiz.a, i = Number(el.dataset.i), v = el.value;
   if (a.done) return;
   // Un élément de droite ne peut être utilisé qu'une fois : on libère l'autre ligne
@@ -1345,7 +1437,7 @@ let drag = null;
 
 document.addEventListener('pointerdown', (e) => {
   const li = e.target.closest('.order.sortable li');
-  if (!li || drag || !S.quiz || S.quiz.a.done) return;
+  if (!li || drag || !S.quiz || !atCurrent() || S.quiz.a.done) return;
   if (e.pointerType === 'mouse' && e.button !== 0) return;
   const items = [...li.parentElement.children];
   const rects = items.map((el) => el.getBoundingClientRect());
