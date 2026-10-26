@@ -1,5 +1,5 @@
 /* Mission Révision — service worker (réseau d'abord, cache si hors ligne) */
-const CACHE = 'mr-shell-v3';
+const CACHE = 'mr-shell-v4';
 const SHELL = [
   './', './index.html', './app.js', './styles.css', './manifest.webmanifest',
   './icons/icon.svg', './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png',
@@ -27,7 +27,9 @@ self.addEventListener('fetch', (e) => {
     const cache = await caches.open(CACHE);
     try {
       const res = await Promise.race([
-        fetch(req),
+        // « no-cache » : on revalide toujours auprès de GitHub Pages (sinon le cache HTTP
+        // du navigateur peut servir l'ancienne version jusqu'à 10 minutes après une mise à jour)
+        fetch(req, { cache: 'no-cache' }),
         new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 5000)),
       ]);
       if (res && res.ok) cache.put(req, res.clone());
