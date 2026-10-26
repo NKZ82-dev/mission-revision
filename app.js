@@ -1,7 +1,7 @@
 /* Mission Révision — PWA de quiz alimentée par un dossier Google Drive (via Apps Script) */
 'use strict';
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.2.0';
 
 /* ================================ Stockage local ================================ */
 const LS = {
@@ -51,7 +51,9 @@ const app = document.getElementById('app');
 
 /* ================================ Utilitaires ================================ */
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const fmt = (s) => esc(s).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br>');
+// Typographie française : espace insécable avant ! ? ; : » et après « (évite « ! » seul en début de ligne)
+const nbsp = (s) => s.replace(/ ([!?;:»])/g, '\u00a0$1').replace(/« /g, '«\u00a0');
+const fmt = (s) => nbsp(esc(s)).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br>');
 const str = (v) => (v == null ? '' : String(v).trim());
 const loose = (s) => str(s).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ');
 const arrStr = (a) => (Array.isArray(a) ? a.map(str).filter(Boolean) : []);
@@ -460,16 +462,34 @@ function selectedItems() {
   return out;
 }
 
+/*
+ * Mélange anti-mémorisation : les propositions sont mélangées à chaque quiz, et on évite
+ * de reproduire la disposition de la fois précédente (pour un QCM, la bonne réponse
+ * change de place) afin qu'on ne puisse pas retenir « c'était la 2ᵉ case ».
+ */
+const LAYOUT = LS.get('layout', {});
+function shuffleAway(arr, key, avoid) {
+  const prev = LAYOUT[key];
+  const sig = (o) => o.join('\u0001');
+  let o = shuffle(arr);
+  for (let guard = 0; guard < 25 && arr.length > 1; guard++) {
+    const same = prev && sig(o) === prev.sig;
+    const samePos = prev && avoid != null && arr.length > 2 && o.indexOf(avoid) === prev.pos;
+    const original = avoid === undefined && sig(o) === sig(arr); // pour l'ordre : jamais déjà trié
+    if (!same && !samePos && !original) break;
+    o = shuffle(arr);
+  }
+  LAYOUT[key] = { sig: sig(o), pos: avoid != null ? o.indexOf(avoid) : -1 };
+  return o;
+}
+
 function prepStep(item, sit) {
   const s = { item, sit, key: item.key };
-  if (item.type === 'qcm' || item.type === 'choix_multiples') s.options = shuffle(item.options);
+  if (item.type === 'qcm') s.options = shuffleAway(item.options, item.key, item.answer);
+  if (item.type === 'choix_multiples') s.options = shuffleAway(item.options, item.key, null);
   if (item.type === 'vrai_faux') s.options = ['Vrai', 'Faux'];
-  if (item.type === 'association') s.rights = shuffle(item.pairs.map((p) => p.r));
-  if (item.type === 'ordre') {
-    let o = shuffle(item.elements), guard = 0;
-    while (o.join('\u0001') === item.elements.join('\u0001') && guard++ < 10) o = shuffle(item.elements);
-    s.order0 = o;
-  }
+  if (item.type === 'association') s.rights = shuffleAway(item.pairs.map((p) => p.r), item.key, null);
+  if (item.type === 'ordre') s.order0 = shuffleAway(item.elements, item.key, undefined);
   return s;
 }
 
@@ -484,6 +504,9 @@ function buildSteps(items, n, onlyKeys) {
       steps.push(prepStep(it, null));
     }
   }
+  const keys = Object.keys(LAYOUT);
+  if (keys.length > 3000) keys.slice(0, keys.length - 3000).forEach((k) => delete LAYOUT[k]);
+  LS.set('layout', LAYOUT);
   return steps;
 }
 
@@ -506,13 +529,15 @@ function startQuiz({ items, n, mode, onlyKeys, label }) {
     steps, i: 0, score: 0, second: 0, log: [], startedAt: Date.now(), mode, label,
     themes: [...new Set(steps.map((s) => s.item.matiere + ' › ' + s.item.theme))],
     a: freshAnswer(steps[0]),
+    streak: 0, wrongStreak: 0,
   };
   S.quitArm = false;
   go('quiz');
+  setTimeout(() => showMascot('happy', pick(MSG.start, 'start').replace('{n}', plural(steps.length, 'question'))), 350);
 }
 
 function freshAnswer(step) {
-  return { tries: 0, done: false, ok: null, retry: false, failed: [], sel: [], pairs: {}, order: step.order0 ? step.order0.slice() : [], wrongInfo: '' };
+  return { tries: 0, done: false, ok: null, retry: false, failed: [], sel: [], pairs: {}, order: step.order0 ? step.order0.slice() : [], wrongInfo: '', title: '', hintTitle: '' };
 }
 
 function launchFromSetup() {
@@ -566,19 +591,39 @@ function submit(ok, info) {
   const Q = S.quiz, a = Q.a, step = Q.steps[Q.i];
   a.tries++;
   if (ok) { a.done = true; a.ok = true; a.retry = false; }
-  else if (S.opts.second && a.tries === 1) { a.retry = true; a.wrongInfo = info || ''; }
+  else if (S.opts.second && a.tries === 1) { a.retry = true; a.wrongInfo = info || ''; a.hintTitle = pick(MSG.retry, 'retry'); }
   else { a.done = true; a.ok = false; a.retry = false; }
+  let mascot = null, sparkle = false;
   if (a.done) {
     const first = a.ok && a.tries === 1;
     Q.log.push({ q: step.key, ok: a.ok, premierEssai: first, essais: a.tries });
-    if (first) Q.score++; else if (a.ok) Q.second++;
+    if (first) { Q.score++; S.bump = true; } else if (a.ok) Q.second++;
+    a.title = pick(first ? MSG.first : a.ok ? MSG.second : MSG.wrong, first ? 'first' : a.ok ? 'second' : 'wrong');
+    // Séries et moments clés
+    if (first) {
+      Q.streak++; Q.wrongStreak = 0;
+      const s = Q.streak;
+      if (s === 3) mascot = ['proud', pick(MSG.streak3, 's3')];
+      else if (s === 5) mascot = ['star', pick(MSG.streak5, 's5')];
+      else if (s >= 8 && s % 4 === 0) mascot = ['star', pick(MSG.streakBig, 'sb').replace('{s}', s)];
+      sparkle = !!mascot || chance(0.22);
+    } else {
+      Q.streak = 0;
+      if (a.ok) Q.wrongStreak = 0;
+      else if (++Q.wrongStreak === 2 || (Q.wrongStreak > 2 && chance(0.4))) mascot = ['encourage', pick(MSG.twoWrong, 'tw')];
+    }
   }
   S.flash = true;
   render();
   requestAnimationFrame(() => {
     const el = document.querySelector(a.done ? '.feedback' : '.hint');
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    if (sparkle) {
+      const good = document.querySelector('.answer.good, .pair.good, .order li.good, .feedback h3');
+      if (good) burstFrom(good, mascot ? 60 : 26);
+    }
   });
+  if (mascot) setTimeout(() => showMascot(mascot[0], mascot[1]), 250);
 }
 
 function finishQuiz() {
@@ -592,7 +637,10 @@ function finishQuiz() {
   Q.finished = true;
   S.history.sessions.push(session);
   LS.set('history', S.history);
-  S.last = { ...session, saved: S.cfg.api ? 'pending' : 'local' };
+  const pct = total ? Math.round(100 * Q.score / total) : 0;
+  const tier = pct === 100 ? 'perfect' : pct >= 80 ? 'great' : pct >= 60 ? 'good' : 'low';
+  S.last = { ...session, saved: S.cfg.api ? 'pending' : 'local', pct, tier, msg: pick(MSG.results[tier], 'res' + tier) };
+  S.celebrate = true;
   if (S.cfg.api) { S.pending.push(session); LS.set('pending', S.pending); flushPending(); }
   go('results', true);
 }
@@ -608,10 +656,213 @@ function answerText(it) {
   }
 }
 
+/* ================================ Effets : messages, mascotte, confettis ================================ */
+const chance = (p) => Math.random() < p;
+const reduceMotion = () => !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+const lastPick = {};
+function pick(pool, key) {
+  if (pool.length < 2) return pool[0];
+  let x;
+  do { x = pool[Math.floor(Math.random() * pool.length)]; } while (x === lastPick[key]);
+  lastPick[key] = x;
+  return x;
+}
+
+const MSG = {
+  start: ['Décollage ! {n} au programme.', "C'est parti pour {n} !", 'Moteurs allumés : {n} à franchir.', 'Mission lancée. Concentration maximale !', '{n}, on y va tranquille.'],
+  first: ['Excellente réponse !', 'Exactement !', 'Bien vu !', 'Parfait !', 'Dans le mille !', 'Impeccable !', 'Tout juste !', "Bravo, c'est ça !", 'Solide !', 'Rien à redire !', 'Pile-poil !', 'Joli coup !', 'Yes !', 'Bonne réponse !'],
+  second: ['Bien joué, au deuxième essai !', 'Rattrapé de justesse !', "L'indice a fait son effet !", 'Deuxième essai réussi !', 'Bien récupéré !', 'Et voilà, trouvé !'],
+  wrong: ['Pas cette fois…', 'Raté, mais tu vas la retenir !', 'Pas tout à fait…', "Presque ! Lis bien l'explication.", 'Celle-là, on la garde pour la prochaine fois.', 'Oups ! Pas grave.'],
+  retry: ['Pas tout à fait… deuxième chance !', 'Hmm, pas encore. Un petit indice ?', 'Presque ! Essaie encore.', 'Pas cette réponse-là. Voici un coup de pouce :', 'Pas loin ! Relis avec cet indice :'],
+  streak3: ["3 d'affilée ! Tu es lancé.", 'Trois sur trois, rien ne t\'arrête !', 'Belle série !', 'Ça tourne à plein régime !'],
+  streak5: ["5 d'affilée ! En orbite !", 'Cinq de suite, impressionnant !', 'Série de 5 ! Tu maîtrises.'],
+  streakBig: ['Série de {s} ! Inarrêtable.', "{s} d'affilée… record en vue ?", '{s} de suite, la classe !'],
+  twoWrong: ['Pas grave : chaque erreur, c\'est une notion de plus à retenir.', 'On respire et on relit bien la question.', "Les erreurs font partie de l'entraînement !", 'Courage, la prochaine est pour toi.'],
+  half: ['Mi-parcours ! Continue comme ça.', 'Déjà la moitié !', 'La moitié est faite, garde le rythme.'],
+  last: ['Dernière question, on termine en beauté !', 'Ultime question !', 'Plus qu\'une !'],
+  results: {
+    perfect: ['Sans faute ! Tu maîtrises le sujet sur le bout des doigts.', 'Score parfait ! Rien ne t\'échappe.', '100 % ! Mission accomplie haut la main.', 'Perfection totale. Respect !'],
+    great: ["Excellent travail, tu es prêt pour l'évaluation !", 'Très solide ! Encore un petit effort sur les questions ci-dessous.', 'Superbe mission ! Tu y es presque.', 'Bravo, tu connais bien ta matière !'],
+    good: ['Bon effort ! Revois les questions ci-dessous et ce sera parfait.', 'Pas mal du tout ! Quelques notions à consolider.', 'Tu progresses ! Refais les questions ratées pour ancrer.', 'Bonne base, on peaufine le reste ?'],
+    low: ["Ne lâche pas : la répétition, c'est la clé de la mémoire.", 'Chaque mission te fait progresser. On réessaie ?', 'Relis les explications ci-dessous, puis retente ta chance.', 'Ce n\'est qu\'un entraînement : maintenant tu sais quoi revoir !'],
+  },
+  hello: ['Prêt pour une petite mission ?', 'Salut ! On révise un peu ?', 'Quelques questions pour garder la forme ?', 'Ton cerveau est prêt au décollage ?'],
+  morning: ['Bon matin ! Une mission pour bien commencer ?'],
+  evening: ['Une petite mission avant le souper ?', 'Dernière révision de la journée ?'],
+};
+
+function greeting() {
+  const h = new Date().getHours();
+  const st = questionStats();
+  let review = 0;
+  S.db.questions.forEach((it) => stepKeys(it).forEach((k) => { if (needsReview(st[k])) review++; }));
+  const pool = MSG.hello.slice();
+  if (h < 11) pool.push(...MSG.morning); else if (h >= 16) pool.push(...MSG.evening);
+  if (review) pool.push(`${plural(review, "question t'attend", "questions t'attendent")} dans « Revoir mes erreurs ».`);
+  return pick(pool, 'hello');
+}
+
+/* --- Mascotte « Comète » (dessin original) --- */
+function mascotSVG(mood) {
+  const ink = '#7c2d12';
+  const openEye = (cx, look) => `<g class="m-eye"><ellipse cx="${cx}" cy="50" rx="6" ry="7.2" fill="#fff"/><circle cx="${cx + 1}" cy="${look ? 47.5 : 51}" r="3.7" fill="#1e1b4b"/><circle cx="${cx + 2.3}" cy="${look ? 46 : 49.5}" r="1.3" fill="#fff"/></g>`;
+  const happyEye = (cx) => `<path d="M${cx - 6} 51 Q${cx} 43.5 ${cx + 6} 51" stroke="${ink}" stroke-width="3.2" fill="none" stroke-linecap="round"/>`;
+  const starEye = (cx) => {
+    const pts = [];
+    for (let i = 0; i < 10; i++) { const r = i % 2 ? 3.3 : 8, a = -Math.PI / 2 + i * Math.PI / 5; pts.push((cx + r * Math.cos(a)).toFixed(1) + ',' + (50 + r * Math.sin(a)).toFixed(1)); }
+    return `<polygon class="m-star" points="${pts.join(' ')}" fill="#db2777"/>`;
+  };
+  const bigMouth = `<path d="M62 62 Q72 77 82 62 Z" fill="${ink}"/><ellipse cx="72" cy="69.5" rx="4.5" ry="2.6" fill="#fb7185"/>`;
+  let eyes, mouth, extra = '';
+  switch (mood) {
+    case 'proud': eyes = happyEye(62) + happyEye(82); mouth = bigMouth; break;
+    case 'star': eyes = starEye(62) + starEye(82); mouth = bigMouth; extra = '<path class="m-spark" d="M101 18l2 5 5 2-5 2-2 5-2-5-5-2 5-2z" fill="#fde047"/>'; break;
+    case 'encourage':
+      eyes = openEye(62, true) + openEye(82, true);
+      mouth = `<path d="M66 65 Q72 69.5 78 65" stroke="${ink}" stroke-width="3" fill="none" stroke-linecap="round"/>`;
+      extra = `<path d="M56 39.5 Q62 36 68 39.5 M76 39.5 Q82 36 88 39.5" stroke="${ink}" stroke-width="2.4" fill="none" stroke-linecap="round"/>`;
+      break;
+    default: eyes = openEye(62) + openEye(82); mouth = `<path d="M63 63.5 Q72 72 81 63.5" stroke="${ink}" stroke-width="3.2" fill="none" stroke-linecap="round"/>`;
+  }
+  return `<svg class="mascot" viewBox="0 0 120 100" aria-hidden="true">
+    <defs>
+      <radialGradient id="mg-body" cx=".38" cy=".33" r=".78"><stop offset="0" stop-color="#fff7c2"/><stop offset=".55" stop-color="#fcd34d"/><stop offset="1" stop-color="#f59e0b"/></radialGradient>
+      <linearGradient id="mg-tail" x1="1" y1="0" x2="0" y2="0"><stop offset="0" stop-color="#f472b6"/><stop offset="1" stop-color="#8b5cf6" stop-opacity="0"/></linearGradient>
+    </defs>
+    <g class="m-tail" stroke="url(#mg-tail)" stroke-linecap="round" fill="none">
+      <path d="M46 40 Q26 30 6 33" stroke-width="9"/><path d="M42 54 Q22 54 2 60" stroke-width="11"/><path d="M47 68 Q29 77 12 87" stroke-width="8"/>
+    </g>
+    <circle cx="72" cy="54" r="32" fill="url(#mg-body)"/>
+    <ellipse cx="60" cy="38" rx="9" ry="5" fill="#fff" opacity=".45" transform="rotate(-25 60 38)"/>
+    <ellipse cx="54" cy="61" rx="5" ry="3" fill="#fb7185" opacity=".45"/><ellipse cx="90" cy="61" rx="5" ry="3" fill="#fb7185" opacity=".45"/>
+    ${eyes}${mouth}${extra}
+  </svg>`;
+}
+
+let fxRoot = null, mascotTimer = null;
+function fxLayer() {
+  if (!fxRoot) { fxRoot = document.createElement('div'); fxRoot.id = 'fx'; document.body.appendChild(fxRoot); }
+  return fxRoot;
+}
+function hideMascot(now) {
+  clearTimeout(mascotTimer);
+  if (!fxRoot) return;
+  fxRoot.querySelectorAll('.mascot-pop').forEach((el) => {
+    if (now) el.remove();
+    else { el.classList.add('out'); setTimeout(() => el.remove(), 350); }
+  });
+}
+function showMascot(mood, text, opts = {}) {
+  hideMascot(true);
+  const el = document.createElement('div');
+  el.className = 'mascot-pop ' + (opts.pos || 'top');
+  el.setAttribute('role', 'status');
+  el.innerHTML = `${mascotSVG(mood)}<div class="bubble">${fmt(text)}</div>`;
+  fxLayer().appendChild(el);
+  mascotTimer = setTimeout(() => hideMascot(), opts.ms || 2900);
+}
+
+/* --- Confettis (canvas, sans dépendance) --- */
+const FX = { canvas: null, ctx: null, parts: [], running: false, w: 0, h: 0 };
+const CONFETTI_COLORS = ['#6366f1', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#38bdf8', '#fde047'];
+function fxCanvas() {
+  if (!FX.canvas) {
+    FX.canvas = document.createElement('canvas');
+    FX.canvas.className = 'confetti';
+    fxLayer().appendChild(FX.canvas);
+    FX.ctx = FX.canvas.getContext('2d');
+  }
+  if (FX.w !== window.innerWidth || FX.h !== window.innerHeight) {
+    const d = Math.min(2, window.devicePixelRatio || 1);
+    FX.w = window.innerWidth; FX.h = window.innerHeight;
+    FX.canvas.width = FX.w * d; FX.canvas.height = FX.h * d;
+    FX.canvas.style.width = FX.w + 'px'; FX.canvas.style.height = FX.h + 'px';
+    FX.ctx.setTransform(d, 0, 0, d, 0, 0);
+  }
+  return FX.ctx;
+}
+function confetti({ x = 0.5, y = 0.5, count = 80, angle = -90, spread = 70, power = 1 } = {}) {
+  if (reduceMotion()) return;
+  fxCanvas();
+  for (let i = 0; i < count; i++) {
+    const a = (angle + (Math.random() - 0.5) * spread) * Math.PI / 180;
+    const v = (7 + Math.random() * 7) * power;
+    FX.parts.push({
+      x: x * FX.w, y: y * FX.h, vx: Math.cos(a) * v, vy: Math.sin(a) * v,
+      r: Math.random() * 6.28, vr: (Math.random() - 0.5) * 0.3, tilt: Math.random() * 6.28, vt: 0.08 + Math.random() * 0.2,
+      w: 5 + Math.random() * 5, h: 8 + Math.random() * 7, round: Math.random() < 0.25, t: 0,
+      c: CONFETTI_COLORS[Math.floor(Math.random() * CONFETTI_COLORS.length)],
+    });
+  }
+  if (!FX.running) { FX.running = true; requestAnimationFrame(confettiTick); }
+}
+function confettiTick() {
+  const ctx = FX.ctx;
+  ctx.clearRect(0, 0, FX.w, FX.h);
+  FX.parts = FX.parts.filter((p) => p.y < FX.h + 30 && p.t < 260);
+  for (const p of FX.parts) {
+    p.t++; p.vx *= 0.985; p.vy = p.vy * 0.985 + 0.32;
+    p.x += p.vx; p.y += p.vy; p.r += p.vr; p.tilt += p.vt;
+    ctx.save();
+    ctx.globalAlpha = p.t > 200 ? (260 - p.t) / 60 : 1;
+    ctx.translate(p.x, p.y); ctx.rotate(p.r); ctx.scale(1, Math.cos(p.tilt));
+    ctx.fillStyle = p.c;
+    if (p.round) { ctx.beginPath(); ctx.arc(0, 0, p.w / 2, 0, 6.283); ctx.fill(); }
+    else ctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h);
+    ctx.restore();
+  }
+  if (FX.parts.length) requestAnimationFrame(confettiTick);
+  else { FX.running = false; ctx.clearRect(0, 0, FX.w, FX.h); }
+}
+function burstFrom(el, count = 30) {
+  const r = el.getBoundingClientRect();
+  confetti({ x: (r.left + r.width / 2) / window.innerWidth, y: (r.top + r.height / 2) / window.innerHeight, count, spread: 140, power: 0.55 });
+}
+function cannons(scale = 1) {
+  confetti({ x: 0.02, y: 0.98, angle: -62, spread: 38, count: Math.round(70 * scale), power: 1.6 });
+  confetti({ x: 0.98, y: 0.98, angle: -118, spread: 38, count: Math.round(70 * scale), power: 1.6 });
+}
+function celebrate(tier) {
+  if (tier === 'perfect') {
+    cannons(1);
+    setTimeout(() => confetti({ x: 0.5, y: 0.3, count: 130, spread: 360, power: 0.75 }), 550);
+    setTimeout(() => cannons(0.6), 1400);
+  } else if (tier === 'great') {
+    confetti({ x: 0.5, y: 0.32, count: 110, spread: 110, power: 1 });
+    if (chance(0.6)) setTimeout(() => cannons(0.5), 700);
+  } else if (tier === 'good') {
+    const ring = app.querySelector('.ring');
+    if (ring) burstFrom(ring, 40);
+  }
+}
+function countUp(el, target) {
+  const t0 = performance.now(), dur = 1000;
+  const step = (t) => {
+    const k = Math.min(1, (t - t0) / dur);
+    el.textContent = Math.round(target * (1 - Math.pow(1 - k, 3))) + '%';
+    if (k < 1 && el.isConnected) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+
+function afterRender() {
+  if (S.view === 'results' && S.celebrate && S.last) {
+    S.celebrate = false;
+    const el = app.querySelector('[data-count]');
+    if (el && !reduceMotion()) countUp(el, Number(el.dataset.count));
+    setTimeout(() => celebrate(S.last.tier), 350);
+  }
+  if (S.view === 'home' && S.db && !S.greeted) {
+    S.greeted = true;
+    if (chance(0.7)) setTimeout(() => { if (S.view === 'home') showMascot('happy', greeting(), { pos: 'bottom', ms: 3800 }); }, 800);
+  }
+}
+
 /* ================================ Navigation ================================ */
 function go(view, replace) {
   S.view = view;
   S.zoom = null;
+  hideMascot(true);
   try { history[replace ? 'replaceState' : 'pushState']({ v: view }, ''); } catch (e) { /* */ }
   render();
   window.scrollTo(0, 0);
@@ -744,7 +995,7 @@ function viewQuiz() {
     <div class="quiz-bar">
       <button class="icon-btn ${S.quitArm ? 'armed' : ''}" data-action="quit" aria-label="Quitter">${S.quitArm ? '<span class="quit-txt">Quitter ?</span>' : ic('x')}</button>
       <span class="chip">${Q.i + 1} / ${Q.steps.length}</span>
-      <span class="chip score">${ic('spark')} ${Q.score}</span>
+      <span class="chip score${S.bump ? ' bump' : ''}">${ic('spark')} ${Q.score}</span>
     </div>
   </div>
   <section class="page quiz">
@@ -757,7 +1008,7 @@ function viewQuiz() {
       <div class="q-meta"><span class="tag">${esc(it.theme)}</span><span class="tag ghost">${TYPE_LABEL[it.type]}</span></div>
       <h2 class="q-text">${fmt(it.text)}</h2>
       ${figure(it.img)}
-      ${a.retry ? `<div class="hint">${ic('bulb')}<div><strong>Pas tout à fait… deuxième chance !</strong>${a.wrongInfo ? `<span class="hint-info">${esc(a.wrongInfo)}</span>` : ''}<span>${it.indice ? fmt(it.indice) : 'Relis bien la question et réessaie.'}</span></div></div>` : ''}
+      ${a.retry ? `<div class="hint">${ic('bulb')}<div><strong>${fmt(a.hintTitle || 'Pas tout à fait… deuxième chance !')}</strong>${a.wrongInfo ? `<span class="hint-info">${esc(a.wrongInfo)}</span>` : ''}<span>${it.indice ? fmt(it.indice) : 'Relis bien la question et réessaie.'}</span></div></div>` : ''}
       ${body}
       ${multiInput && !a.done ? `<button class="btn primary block" data-action="validate" ${canValidate ? '' : 'disabled'}>${ic('check')} Valider</button>` : ''}
     </article>
@@ -768,24 +1019,24 @@ function viewQuiz() {
 function answersChoice(step, a) {
   const it = step.item;
   const correct = it.type === 'vrai_faux' ? (it.answer ? 'Vrai' : 'Faux') : it.answer;
-  return `<div class="answers ${it.type === 'vrai_faux' ? 'two' : ''}">${step.options.map((o) => {
+  return `<div class="answers ${it.type === 'vrai_faux' ? 'two' : ''}">${step.options.map((o, i) => {
     const failed = a.failed.includes(o);
     let cls = '';
     if (a.done) cls = o === correct ? 'good' : failed ? 'bad' : 'dim';
     else if (failed) cls = 'bad';
     const mark = a.done && o === correct ? ic('check', 'mk') : failed ? ic('x', 'mk') : '';
-    return `<button class="answer ${cls}" data-action="choose" data-o="${esc(o)}" ${a.done || failed ? 'disabled' : ''}><span>${fmt(o)}</span>${mark}</button>`;
+    return `<button class="answer ${cls}" style="--i:${i}" data-action="choose" data-o="${esc(o)}" ${a.done || failed ? 'disabled' : ''}><span>${fmt(o)}</span>${mark}</button>`;
   }).join('')}</div>`;
 }
 
 function answersMulti(step, a) {
   const it = step.item;
   return `<p class="hint-text">Plusieurs réponses possibles — coche toutes les bonnes.</p>
-  <div class="answers">${step.options.map((o) => {
+  <div class="answers">${step.options.map((o, i) => {
     const on = a.sel.includes(o), good = it.answers.includes(o);
     let cls = on ? 'on' : '', note = '';
     if (a.done) { cls = good ? (on ? 'good' : 'good missed') : on ? 'bad' : 'dim'; if (good && !on) note = '<em>oubliée</em>'; }
-    return `<button class="answer check ${cls}" role="checkbox" aria-checked="${on}" data-action="toggle" data-o="${esc(o)}" ${a.done ? 'disabled' : ''}>
+    return `<button class="answer check ${cls}" style="--i:${i}" role="checkbox" aria-checked="${on}" data-action="toggle" data-o="${esc(o)}" ${a.done ? 'disabled' : ''}>
       <span class="box">${on ? ic('check') : ''}</span><span class="grow">${fmt(o)} ${note}</span>${a.done && good ? ic('check', 'mk') : a.done && on ? ic('x', 'mk') : ''}</button>`;
   }).join('')}</div>`;
 }
@@ -799,7 +1050,7 @@ function answersPairs(step, a) {
       return `<div class="pair ${ok ? 'good' : 'bad'}"><div class="pair-l">${fmt(p.l)}</div>
         <div class="pair-r">${ok ? `${ic('check', 'mk')} ${esc(p.r)}` : `<s>${esc(v || '—')}</s><span class="fix">${ic('right')} ${esc(p.r)}</span>`}</div></div>`;
     }
-    return `<label class="pair"><div class="pair-l">${fmt(p.l)}</div>
+    return `<label class="pair" style="--i:${i}"><div class="pair-l">${fmt(p.l)}</div>
       <select data-change="pair" data-i="${i}" class="${v ? 'set' : ''}">
         <option value="">Choisir…</option>
         ${step.rights.map((r) => `<option value="${esc(r)}" ${r === v ? 'selected' : ''}>${esc(r)}</option>`).join('')}
@@ -817,13 +1068,13 @@ function answersOrder(step, a) {
     ${a.ok ? '' : `<p class="label-sm">Le bon ordre :</p><ol class="order solution">${it.elements.map((x, i) => `<li><span class="num">${i + 1}</span><span class="grow">${fmt(x)}</span></li>`).join('')}</ol>`}`;
   }
   return `<p class="hint-text">Fais glisser les éléments avec le doigt pour les remettre dans l'ordre.</p>
-  <ol class="order sortable">${a.order.map((x, i) => `<li data-i="${i}"><span class="num">${i + 1}</span><span class="grow">${fmt(x)}</span>
+  <ol class="order sortable">${a.order.map((x, i) => `<li data-i="${i}" style="--i:${i}"><span class="num">${i + 1}</span><span class="grow">${fmt(x)}</span>
     <span class="grip">${ic('grip')}</span></li>`).join('')}</ol>`;
 }
 
 function feedback(step, a, Q) {
   const it = step.item;
-  const title = a.ok ? (a.tries === 1 ? 'Excellente réponse !' : 'Bien joué, au deuxième essai !') : 'Pas cette fois…';
+  const title = fmt(a.title || (a.ok ? 'Excellente réponse !' : 'Pas cette fois…'));
   const last = Q.i + 1 === Q.steps.length;
   const showAnswer = !a.ok && (it.type === 'qcm' || it.type === 'vrai_faux');
   return `<div class="card feedback ${a.ok ? 'ok' : 'ko'}">
@@ -841,14 +1092,14 @@ function feedback(step, a, Q) {
 function viewResults() {
   const r = S.last, Q = S.quiz;
   const pct = r.total ? Math.round(100 * r.score / r.total) : 0;
-  const msg = pct === 100 ? 'Sans faute ! Tu maîtrises le sujet sur le bout des doigts.' : pct >= 80 ? 'Excellent travail, tu es prêt pour l\'évaluation !' : pct >= 60 ? 'Bon effort ! Revois les questions ci-dessous et ce sera parfait.' : 'Ne lâche pas : la répétition, c\'est la clé de la mémoire.';
+  const mood = { perfect: 'star', great: 'proud', good: 'happy', low: 'encourage' }[r.tier] || 'happy';
   const tone = pct >= 80 ? 'good' : pct >= 60 ? 'mid' : 'low';
   const missed = Q.steps.filter((s, i) => Q.log[i] && !Q.log[i].premierEssai);
   const saved = r.saved === 'drive' ? `${ic('check')} Résultat enregistré dans Drive` : r.saved === 'pending' ? `${ic('sync')} Enregistrement dans Drive…` : 'Résultat enregistré sur cet appareil (mode démo)';
   return `<section class="page results">
     <h1 class="center">Bilan de mission</h1>
-    <div class="ring ${tone}" style="--p:${pct}"><div><strong>${pct}%</strong><small>${r.score} / ${r.total}</small></div></div>
-    <p class="center lead">${msg}</p>
+    <div class="ring ${tone}" style="--p:${pct}"><div><strong data-count="${pct}">${pct}%</strong><small>${r.score} / ${r.total}</small></div></div>
+    <div class="res-mascot ${mood}">${mascotSVG(mood)}<p class="bubble lead">${fmt(r.msg)}</p></div>
     ${r.secondEssai ? `<p class="center muted">+ ${plural(r.secondEssai, 'question réussie', 'questions réussies')} au 2ᵉ essai</p>` : ''}
     <p class="center small muted save-state">${saved}</p>
     ${missed.length ? `<h2 class="section-title">À revoir</h2>
@@ -972,9 +1223,10 @@ function render() {
   if (keep) { if (keep.api != null) setValue('f-api', keep.api); if (keep.key != null) setValue('f-key', keep.key); }
   app.classList.toggle('enter', app.dataset.view !== S.view || !!S.enter);
   app.classList.toggle('flash', !!S.flash);
-  S.enter = false; S.flash = false;
+  S.enter = false; S.flash = false; S.bump = false;
   app.dataset.view = S.view;
   hydrateImages();
+  afterRender();
 }
 const valueOf = (id) => { const el = document.getElementById(id); return el ? el.value : null; };
 const setValue = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
@@ -1029,7 +1281,11 @@ const ACTIONS = {
     const Q = S.quiz;
     if (Q.i + 1 >= Q.steps.length) { finishQuiz(); return; }
     Q.i++; Q.a = freshAnswer(Q.steps[Q.i]); S.quitArm = false; S.enter = true;
+    hideMascot();
     render(); window.scrollTo(0, 0);
+    const n = Q.steps.length;
+    if (Q.i === n - 1 && n >= 5 && chance(0.6)) setTimeout(() => showMascot('happy', pick(MSG.last, 'last')), 300);
+    else if (n >= 8 && Q.i === Math.floor(n / 2) && chance(0.5)) setTimeout(() => showMascot('happy', pick(MSG.half, 'half')), 300);
   },
   quit: () => {
     if (S.quitArm) { S.quiz = null; S.quitArm = false; go('home', true); return; }
