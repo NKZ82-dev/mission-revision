@@ -1,7 +1,7 @@
 /* Mission Révision — PWA de quiz alimentée par un dossier Google Drive (via Apps Script) */
 'use strict';
 
-const APP_VERSION = '2.5.0';
+const APP_VERSION = '2.6.0';
 
 /* ================================ Stockage local ================================ */
 const LS = {
@@ -20,7 +20,7 @@ const S = {
   pending: LS.get('pending', []),
   sync: { loading: false, msg: '', type: '' },
   sel: LS.get('sel', {}),
-  opts: Object.assign({ n: 10, second: true, mode: 'random' }, LS.get('opts', {})),
+  opts: Object.assign({ n: 10, second: true, mode: 'random', confirm: true }, LS.get('opts', {})),
   quiz: null,
   last: null,
   zoom: null,
@@ -676,7 +676,7 @@ function viewPrep() {
 const atCurrent = () => S.quiz && S.quiz.vi === S.quiz.i;
 
 function freshAnswer(step) {
-  return { tries: 0, done: false, ok: null, retry: false, failed: [], sel: [], pairs: {}, order: step.order0 ? step.order0.slice() : [], wrongInfo: '', title: '', hintTitle: '' };
+  return { tries: 0, done: false, ok: null, retry: false, failed: [], sel: [], pairs: {}, order: step.order0 ? step.order0.slice() : [], wrongInfo: '', title: '', hintTitle: '', pick: null };
 }
 
 function launchFromSetup() {
@@ -999,6 +999,16 @@ function afterRender() {
   }
 }
 
+/* Réponse à une question à choix unique (qcm / vrai-faux) */
+function answerChoice(o) {
+  const Q = S.quiz, a = Q.a, it = Q.steps[Q.i].item;
+  if (a.done || a.failed.includes(o)) return;
+  const correct = it.type === 'vrai_faux' ? (it.answer ? 'Vrai' : 'Faux') : it.answer;
+  if (o !== correct) a.failed.push(o);
+  a.pick = null;
+  submit(o === correct, '');
+}
+
 /* ================================ Navigation ================================ */
 function go(view, replace) {
   S.view = view;
@@ -1113,6 +1123,10 @@ function viewSetup() {
         <span><strong>Seconde chance</strong><small>En cas d'erreur, un indice s'affiche et tu peux réessayer. Le point ne compte qu'au premier essai.</small></span>
         <span class="switch ${S.opts.second ? 'on' : ''}"><i></i></span>
       </button>
+      <button class="switch-row" role="switch" aria-checked="${S.opts.confirm}" data-action="opt" data-k="confirm" data-val="${!S.opts.confirm}">
+        <span><strong>Bouton « Valider »</strong><small>Tu choisis ta réponse, puis tu confirmes avec « Valider ». Évite les erreurs de doigt.</small></span>
+        <span class="switch ${S.opts.confirm ? 'on' : ''}"><i></i></span>
+      </button>
     </div>
     <div class="sticky-cta">
       <button class="btn primary xl" data-action="launch" ${avail ? '' : 'disabled'}>${ic('play')} Lancer la mission</button>
@@ -1126,7 +1140,8 @@ function viewQuiz() {
   const past = vi < Q.i;
   const pct = Math.round(100 * (Q.i + (Q.a.done ? 1 : 0)) / Q.steps.length);
   const sit = step.sit;
-  const multiInput = ['choix_multiples', 'association', 'ordre'].includes(it.type);
+  const single = it.type === 'qcm' || it.type === 'vrai_faux';
+  const multiInput = ['choix_multiples', 'association', 'ordre'].includes(it.type) || (single && S.opts.confirm);
 
   let body = '';
   if (it.type === 'qcm' || it.type === 'vrai_faux') body = answersChoice(step, a);
@@ -1134,7 +1149,7 @@ function viewQuiz() {
   else if (it.type === 'association') body = answersPairs(step, a);
   else if (it.type === 'ordre') body = answersOrder(step, a);
 
-  const canValidate = it.type === 'choix_multiples' ? a.sel.length > 0 : it.type === 'association' ? it.pairs.every((p, i) => a.pairs[i]) : true;
+  const canValidate = single ? !!a.pick : it.type === 'choix_multiples' ? a.sel.length > 0 : it.type === 'association' ? it.pairs.every((p, i) => a.pairs[i]) : true;
 
   return `
   <div class="quiz-top">
@@ -1176,6 +1191,7 @@ function answersChoice(step, a) {
     let cls = '';
     if (a.done) cls = o === correct ? 'good' : failed ? 'bad' : 'dim';
     else if (failed) cls = 'bad';
+    else if (a.pick === o) cls = 'on';
     const mark = a.done && o === correct ? ic('check', 'mk') : failed ? ic('x', 'mk') : '';
     return `<button class="answer ${cls}" style="--i:${i}" data-action="choose" data-o="${esc(o)}" ${a.done || failed ? 'disabled' : ''}><span>${fmt(o)}</span>${mark}</button>`;
   }).join('')}</div>`;
@@ -1552,7 +1568,7 @@ const ACTIONS = {
   },
   opt: (d) => {
     let v = d.val;
-    if (d.k === 'second') v = v === 'true';
+    if (d.k === 'second' || d.k === 'confirm') v = v === 'true';
     else if (d.k === 'n' && v !== 'all') v = Number(v);
     S.opts[d.k] = v; LS.set('opts', S.opts); render();
   },
@@ -1603,9 +1619,9 @@ const ACTIONS = {
     if (!atCurrent()) return;
     const Q = S.quiz, step = Q.steps[Q.i], a = Q.a, it = step.item;
     if (a.done || a.failed.includes(d.o)) return;
-    const correct = it.type === 'vrai_faux' ? (it.answer ? 'Vrai' : 'Faux') : it.answer;
-    if (d.o !== correct) a.failed.push(d.o);
-    submit(d.o === correct, '');
+    // Avec le bouton « Valider » : un toucher sélectionne seulement (on peut changer d'avis)
+    if (S.opts.confirm) { a.pick = a.pick === d.o ? null : d.o; render(); return; }
+    answerChoice(d.o);
   },
   toggle: (d) => {
     if (!atCurrent()) return;
@@ -1615,7 +1631,9 @@ const ACTIONS = {
   },
   validate: () => {
     if (!atCurrent()) return;
-    const Q = S.quiz, r = evaluate(Q.steps[Q.i], Q.a);
+    const Q = S.quiz, it = Q.steps[Q.i].item;
+    if (it.type === 'qcm' || it.type === 'vrai_faux') { if (Q.a.pick) answerChoice(Q.a.pick); return; }
+    const r = evaluate(Q.steps[Q.i], Q.a);
     submit(r.ok, r.info);
   },
   next: () => {
