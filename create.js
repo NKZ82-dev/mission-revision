@@ -193,7 +193,7 @@ async function listModels() {
 const VISUEL_SCHEMA = {
   type: 'OBJECT',
   properties: {
-    type: { type: 'STRING', enum: ['aucun', 'figure', 'svg', 'illustration'] },
+    type: { type: 'STRING', enum: ['aucun', 'figure'] },
     photo: { type: 'INTEGER' },
     zone: { type: 'ARRAY', items: { type: 'INTEGER' } },
     svg: { type: 'STRING' },
@@ -216,11 +216,12 @@ const Q_PROPS = {
   explication: { type: 'STRING' },
   astuce: { type: 'STRING' },
   page: { type: 'STRING' },
+  photo_source: { type: 'INTEGER' },
   visuel: VISUEL_SCHEMA,
 };
 // Indice, explication et astuce sont OBLIGATOIRES : le schéma l'impose au modèle
 // Les champs de réponse sont aussi obligatoires (vides s'ils ne concernent pas le type) : sinon le modèle les « oublie » parfois
-const REQUIRED = ['type', 'notion', 'difficulte', 'question', 'options', 'reponse', 'reponse_vrai', 'reponses', 'paires', 'elements', 'indice', 'explication', 'astuce', 'visuel'];
+const REQUIRED = ['type', 'notion', 'difficulte', 'question', 'photo_source', 'options', 'reponse', 'reponse_vrai', 'reponses', 'paires', 'elements', 'indice', 'explication', 'astuce', 'visuel'];
 const SUB_SCHEMA = { type: 'OBJECT', properties: Q_PROPS, required: REQUIRED };
 const QUESTION_SCHEMA = {
   type: 'OBJECT',
@@ -251,7 +252,13 @@ const DEFAULT_MIX = 'environ 40 % qcm, 15 % vrai_faux, 15 % choix_multiples, 15 
  * 3. « illustration » : seulement si l'option est cochée, pour rendre concrète une question (objet, scène) → Nano Banana (payant)
  * Quotas par lot pour garder la génération rapide ; l'app les fait respecter.
  */
-const visualQuota = (n, illus) => ({ figure: Math.ceil(n / 3), svg: Math.ceil(n / 8), illustration: illus ? Math.ceil(n / 5) : 0 });
+const visualQuota = (n, illus) => ({ figure: Math.ceil(n / 5), svg: 0, illustration: 0 });
+
+/* Visuels créés APRÈS la rédaction, par un plan dédié : schémas SVG et illustrations générées */
+const visualTargets = (n, illus) => ({
+  illustration: illus && S.parent.imageModel ? Math.max(1, Math.round(n * 0.25)) : 0,
+  svg: Math.max(1, Math.round(n * (illus ? 0.15 : 0.2))),
+});
 
 /* Matières proposées (en plus de celles déjà présentes dans Drive) */
 const COMMON_MATIERES = ['Sciences', 'Mathématiques', 'Français', 'Anglais', 'Histoire', 'Géographie', 'Culture et citoyenneté québécoise', 'Arts plastiques', 'Musique', 'Éducation physique', 'Espagnol'];
@@ -301,7 +308,7 @@ CONTENU
    - « explication » : 1 à 2 phrases sur le POURQUOI de la bonne réponse ;
    - « astuce » : l'« astuce de pro », un moyen mnémotechnique, une règle simple ou un truc pour ne plus se tromper (1 phrase courte).
    Pour une « situation » elle-même, mets ces trois champs à "" : ils vont dans ses sous_questions.
-7. « page » : numéro de page visible sur la photo ("" si illisible). « notion » : la sous-notion travaillée.
+7. « page » : numéro de page imprimé sur la photo ("" si illisible). « photo_source » : numéro de la Photo où se trouve la notion interrogée. « notion » : la sous-notion travaillée.
 8. Virgule décimale, symboles Unicode (cm³, H₂O, °C, ×, −). Mot clé en gras possible avec **double astérisque**.
 
 FORMAT PAR TYPE (remplis TOUS les champs du schéma : ceux qui ne concernent pas le type valent [], "" ou false)
@@ -312,11 +319,8 @@ FORMAT PAR TYPE (remplis TOUS les champs du schéma : ceux qui ne concernent pas
 - ordre : « elements » (3 à 6) DANS LE BON ORDRE ; le critère d'ordre est dans la question.
 - situation : « titre », « contexte » (scénario concret de 2 à 4 phrases avec les données utiles), « question » = courte consigne, « sous_questions ».
 
-VISUELS (champ « visuel » obligatoire ; type « aucun » par défaut). Choisis dans cet ordre de priorité :
-1. « figure » (au plus ${q.figure}) : la photo contient déjà un schéma, tableau, graphique ou une image utile à la question → donne « photo » (son numéro) et « zone » = [ymin, xmin, ymax, xmax] de 0 à 1000, cadrée serrée autour de la figure et de ses légendes, SANS texte qui donne la réponse.
-2. « svg » (au plus ${q.svg}) : seulement si un schéma précis est indispensable et absent des pages (instrument gradué, figure géométrique, graphique). Une ligne <svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 L H' width='L' height='H'> (L, H ≤ 300), apostrophes simples, formes simples, font-family='Arial', texte ≥ 13 px. Schéma exact et sobre, 1 500 caractères au maximum (pas de tracés détaillés).
-${q.illustration ? `3. « illustration » (au plus ${q.illustration}) : pour rendre une question plus concrète (objet, scène, organisme) quand les pages n'ont pas d'image utile. « description » = description visuelle détaillée. Elle ne doit jamais être nécessaire pour répondre ni montrer la réponse.` : '3. N\'utilise JAMAIS le type « illustration ».'}
-Pour tout visuel, « description » contient une phrase qui décrit l'image.
+VISUEL (champ « visuel » obligatoire, type « aucun » par défaut — les schémas et illustrations seront ajoutés plus tard par un autre outil) :
+- « figure » (au plus ${q.figure}) : SEULEMENT si la photo contient un schéma, un tableau, un graphique ou une photo indispensable à la question → « photo » (son numéro) et « zone » = [ymin, xmin, ymax, xmax] de 0 à 1000, cadrée serrée autour de la figure et de ses légendes, SANS texte qui donne la réponse. « description » : une phrase qui décrit l'image.
 
 Avant de répondre, vérifie : nombre exact de questions, réponses copiées exactement des options, indice/explication/astuce présents partout, aucune erreur scientifique.
 « source » : par exemple « Manuel, p. 112-118 ». « matiere » : ${matiere ? `« ${matiere} »` : 'la matière déduite des pages'}. « theme » : ${theme ? `« ${theme} »` : 'le thème déduit des pages'}.`;
@@ -523,13 +527,17 @@ function closestOption(options, v) {
 function makeIds(C, matiere) {
   const now = new Date();
   const stamp = `${String(now.getFullYear()).slice(2)}${pad2(now.getMonth() + 1)}${pad2(now.getDate())}${pad2(now.getHours())}${pad2(now.getMinutes())}`;
-  return { now, prefix: slugify(matiere).slice(0, 3) + stamp, day: `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`, hm: `${pad2(now.getHours())}${pad2(now.getMinutes())}` };
+  // Suffixe aléatoire : deux missions créées la même minute n'écrasent jamais leurs fichiers ni leurs images
+  const rnd = Math.random().toString(36).slice(2, 5);
+  return { now, prefix: slugify(matiere).slice(0, 3) + stamp + rnd, day: `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`, hm: `${pad2(now.getHours())}${pad2(now.getMinutes())}-${rnd}` };
 }
 
 function convertQuestion(q, id, C) {
   const o = { id, type: q.type };
   ['notion', 'question', 'indice', 'explication', 'astuce', 'page'].forEach((k) => { if (q[k] != null && String(q[k]).trim()) o[k] = String(q[k]).trim(); });
   if (q.difficulte) o.difficulte = Math.max(1, Math.min(3, Number(q.difficulte) || 2));
+  const ph = Number(q.photo_source);
+  if (ph >= 1 && ph <= C.photos.length) o.photo = ph;
   switch (q.type) {
     case 'qcm': o.options = arrStr(q.options); o.reponse = closestOption(o.options, q.reponse); break;
     case 'vrai_faux': o.reponse = typeof q.reponse_vrai === 'boolean' ? q.reponse_vrai : toBool(q.reponse); break;
@@ -635,6 +643,86 @@ function resolveVisuals(D, C) {
   genLog(C, `Visuels retenus : ${used.figure} figure(s) du manuel, ${used.svg} schéma(s) SVG, ${used.illustration} illustration(s)`);
 }
 
+/* ---------- Plan des visuels : quelles questions méritent un schéma ou une illustration ---------- */
+async function planVisuals(C, D, want) {
+  const cands = [];
+  D.data.questions.forEach((q) => {
+    if (q.image || q.svg) return;
+    if (q.type === 'situation') cands.push({ id: q.id, type: 'mise en situation', question: q.contexte, reponse: '' });
+    else cands.push({ id: q.id, type: q.type, question: q.question, reponse: plainAnswer(q) });
+  });
+  if (!cands.length) return [];
+  const nIll = Math.min(want.illustration, cands.length);
+  const nSvg = Math.min(want.svg, Math.max(0, cands.length - nIll));
+  if (!nIll && !nSvg) return [];
+  const kinds = [nIll ? 'illustration' : null, nSvg ? 'schema' : null].filter(Boolean);
+  const body = {
+    contents: [{ role: 'user', parts: [{ text: `Tu prépares les visuels d'un quiz pour un élève de ${S.parent.niveau || 'secondaire'} (${D.data.matiere} — ${D.data.theme}).
+Parmi les questions ci-dessous, choisis :
+${nIll ? `- exactement ${nIll} question(s) à accompagner d'une ILLUSTRATION (image générée : objet, expérience, phénomène, scène de la vie courante) — là où une image aide à se représenter la situation ;
+` : ''}${nSvg ? `- exactement ${nSvg} question(s) à accompagner d'un SCHEMA (dessin simple : montage, classification, étapes, graphique, mesure, comparaison) — là où un schéma clarifie la notion ;
+` : ''}Règles :
+- le visuel ne doit JAMAIS révéler la réponse (aucun texte ni détail qui la donne) ni être indispensable pour répondre ;
+- varie les questions choisies (types et notions différents) ;
+- « description » : description visuelle précise en français de ce qu'on doit voir (éléments, disposition, couleurs), comme pour un illustrateur ;
+- « alt » : une phrase courte qui décrit l'image.
+
+Questions : ${JSON.stringify(cands)}` }] }],
+    generationConfig: {
+      responseMimeType: 'application/json', temperature: 0.6, maxOutputTokens: 6000,
+      responseSchema: { type: 'OBJECT', properties: { items: { type: 'ARRAY', items: { type: 'OBJECT', properties: { id: { type: 'STRING' }, kind: { type: 'STRING', enum: kinds }, description: { type: 'STRING' }, alt: { type: 'STRING' } }, required: ['id', 'kind', 'description', 'alt'] } } }, required: ['items'] },
+    },
+  };
+  const j = await withFallback(C, textModelChain(), (model) => geminiFetch(`models/${model}:generateContent`, body, 90000), (m) => setProgress(undefined, m));
+  const cand = j.candidates && j.candidates[0];
+  const text = cand && cand.content && (cand.content.parts || []).filter((p) => !p.thought).map((p) => p.text || '').join('');
+  const items = (JSON.parse(text || '{}').items || []);
+  const ids = new Set(cands.map((c) => c.id));
+  const seen = new Set();
+  const count = { illustration: 0, schema: 0 };
+  return items.filter((x) => {
+    if (!ids.has(x.id) || seen.has(x.id) || !x.description) return false;
+    const max = x.kind === 'illustration' ? nIll : nSvg;
+    if (count[x.kind] >= max) return false;
+    seen.add(x.id); count[x.kind]++;
+    return true;
+  });
+}
+
+/* Nettoie un SVG produit par le modèle (pas de script, pas d'événements, pas de ressources externes) */
+function cleanSvg(raw) {
+  let t = String(raw || '');
+  const a = t.search(/<svg[\s>]/i), z = t.toLowerCase().lastIndexOf('</svg>');
+  if (a < 0 || z < a) return '';
+  t = t.slice(a, z + 6)
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/\son\w+\s*=\s*("[^"]*"|'[^']*')/gi, '')
+    .replace(/(href\s*=\s*)("|')\s*(?:https?:|javascript:)[^"']*\2/gi, '$1$2#$2');
+  if (!/xmlns=/.test(t)) t = t.replace(/<svg/i, '<svg xmlns="http://www.w3.org/2000/svg"');
+  return t.length <= 20000 ? t : '';
+}
+
+async function generateSvg(C, q, plan) {
+  const body = {
+    contents: [{ role: 'user', parts: [{ text: `Dessine en SVG un schéma pédagogique pour un quiz (élève de ${S.parent.niveau || 'secondaire'}).
+Schéma demandé : ${plan.description}
+Question associée (pour le contexte) : ${q.question || q.contexte}
+Contraintes :
+- <svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 480 320' width='480' height='320'>, fond blanc (rect plein en premier) ;
+- formes simples et nettes : traits #1e293b de 2 à 3 px, couleurs douces (#93c5fd, #fcd34d, #86efac, #fca5a5, #c4b5fd) ;
+- texte en français, font-family='Arial', taille 14 à 18 px, lisible, sans chevauchement, à l'intérieur du cadre ;
+- AUCUN texte ni détail qui donne la réponse${plainAnswer(q) ? ` (« ${plainAnswer(q)} »)` : ''} ;
+- pas de script, pas d'image externe, moins de 6 000 caractères.
+Réponds UNIQUEMENT avec le code SVG.` }] }],
+    generationConfig: { temperature: 0.4, maxOutputTokens: 8000 },
+  };
+  const j = await withFallback(C, textModelChain(), (model) => geminiFetch(`models/${model}:generateContent`, body, 90000), () => {});
+  const cand = j.candidates && j.candidates[0];
+  const svg = cleanSvg(cand && cand.content && (cand.content.parts || []).filter((p) => !p.thought).map((p) => p.text || '').join(''));
+  if (!svg) throw new Error('SVG invalide');
+  return svg;
+}
+
 async function cropFigure(C, t) {
   const p = C.photos[t.photo];
   const im = await loadImageEl(p.dataUrl);
@@ -655,10 +743,11 @@ async function cropFigure(C, t) {
 }
 
 async function generateIllustration(t) {
-  const prompt = `Illustration éducative pour un élève de ${S.parent.niveau || 'secondaire'} : ${t.description}. Style : illustration claire, nette et colorée sur fond blanc, format carré, sans texte (sauf légendes indispensables). Ne montre jamais la réponse à une question.`;
+  const prompt = `Illustration éducative pour un manuel scolaire (élève de ${S.parent.niveau || 'secondaire'}) : ${t.description}
+Style : illustration numérique nette et moderne, couleurs vives mais douces, fond blanc ou très clair, cadrage centré, aucun texte ni étiquette, aucune réponse écrite.`;
   const j = await geminiFetch(`models/${S.parent.imageModel}:generateContent`, {
     contents: [{ role: 'user', parts: [{ text: prompt }] }],
-    generationConfig: { responseModalities: ['IMAGE'], imageConfig: { aspectRatio: '1:1' } },
+    generationConfig: { responseModalities: ['IMAGE'], imageConfig: { aspectRatio: '4:3' } },
   }, 120000);
   const parts = (j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts) || [];
   const img = parts.map((p) => p.inlineData || p.inline_data).find(Boolean);
@@ -765,6 +854,8 @@ async function generateMission() {
         titre: C.titre.trim() || undefined, niveau: S.parent.niveau || undefined, source: source || undefined,
         genere: { par: [...new Set(C.progress.rows.map((r) => r.model).filter(Boolean))].join(', ') || S.parent.textModel, le: ids.now.toISOString() },
         questions: kept,
+        // Photos d'origine (dossier _sources/…) : la page citée dans la correction s'ouvre en un clic
+        sources: { dossier: `${slugify(theme).slice(0, 40)}-${ids.day}-${ids.hm}`, photos: C.photos.map((_, i) => `photo-${pad2(i + 1)}.jpg`) },
       },
       files: {}, removed: new Set(), warnings: rejected.slice(),
       base: `${slugify(theme).slice(0, 40)}-${ids.day}-${ids.hm}`,
@@ -780,23 +871,50 @@ async function generateMission() {
       try { D.files[t.name] = await cropFigure(C, t); }
       catch (e) { delete t.q.image; delete t.q.image_alt; D.warnings.push(`Figure non découpée (${t.q.id}) : ${e.message}`); }
     }
-    const ill = D.tasks.filter((t) => t.kind === 'illustration');
-    let done = 0, stop = false;
-    const worker = async () => {
-      while (ill.length) {
-        const t = ill.shift();
-        if (stop || S.create !== C) { delete t.q.image; delete t.q.image_alt; continue; }
-        try { D.files[t.name] = await withFallback(C, [S.parent.imageModel], () => generateIllustration(t), (m) => setProgress(undefined, m)); }
-        catch (e) {
-          delete t.q.image; delete t.q.image_alt;
-          D.warnings.push(`Illustration non générée (${t.q.id}) : ${e.message}`);
-          genLog(C, `Illustration ${t.q.id} : ÉCHEC — ${e.message}`);
-          if (e.status === 429 || e.status === 403 || e.status === 404) stop = true;
-        }
-        setProgress('Création des illustrations…', `${++done} / ${done + ill.length}`);
-      }
+    // 5. Schémas et illustrations : un plan choisit les questions, puis génération en parallèle
+    const want = visualTargets(C.n, C.illus);
+    let plan = [];
+    try {
+      setProgress('Choix des schémas et illustrations…', `${want.svg} schéma(s)${want.illustration ? `, ${want.illustration} illustration(s)` : ''} visés`);
+      plan = await planVisuals(C, D, want);
+      genLog(C, `Plan des visuels : ${plan.filter((x) => x.kind === 'schema').length} schéma(s), ${plan.filter((x) => x.kind === 'illustration').length} illustration(s)`);
+    } catch (e) { genLog(C, `Plan des visuels impossible : ${e.message}`); }
+    const byId = {};
+    D.data.questions.forEach((q) => { byId[q.id] = q; });
+    const svgJobs = plan.filter((x) => x.kind === 'schema'), illJobs = plan.filter((x) => x.kind === 'illustration');
+    const rowS = { label: 'Schémas', info: `${svgJobs.length} à dessiner`, state: svgJobs.length ? 'run' : 'ok', msg: '' };
+    const rowI = { label: 'Illustrations', info: `${illJobs.length} à générer`, state: illJobs.length ? 'run' : 'ok', msg: '' };
+    C.progress.rows = [rowS].concat(illJobs.length ? [rowI] : []);
+    setProgress('Création des visuels…', '');
+    let nS = 0, nI = 0, stopI = false;
+    const runJobs = async (jobs, conc, fn) => {
+      const queue = jobs.slice();
+      await Promise.all(Array.from({ length: Math.min(conc, queue.length) }, async () => {
+        while (queue.length) { const x = queue.shift(); if (S.create !== C) return; await fn(x); }
+      }));
     };
-    if (ill.length) { setProgress('Création des illustrations…', `0 / ${ill.length}`); await Promise.all([worker(), worker()]); }
+    await Promise.all([
+      runJobs(svgJobs, 3, async (x) => {
+        const q = byId[x.id];
+        try { q.svg = await generateSvg(C, q, x); q.image_alt = x.alt; }
+        catch (e) { D.warnings.push(`Schéma non créé (${x.id}) : ${e.message}`); genLog(C, `Schéma ${x.id} : ÉCHEC — ${e.message}`); }
+        Object.assign(rowS, { msg: `${++nS} / ${svgJobs.length}` }); setProgress();
+      }),
+      runJobs(illJobs, 2, async (x) => {
+        const q = byId[x.id];
+        if (stopI) return;
+        const name = `${x.id}-illustration.jpg`;
+        try { D.files[name] = await withFallback(C, [S.parent.imageModel], () => generateIllustration({ description: x.description }), () => {}); q.image = name; q.image_alt = x.alt; }
+        catch (e) {
+          D.warnings.push(`Illustration non générée (${x.id}) : ${e.message}`);
+          genLog(C, `Illustration ${x.id} : ÉCHEC — ${e.message}`);
+          if (e.status === 429 || e.status === 403 || e.status === 404 || e.status === 402) stopI = true;
+        }
+        Object.assign(rowI, { msg: `${++nI} / ${illJobs.length}` }); setProgress();
+      }),
+    ]);
+    rowS.state = 'ok'; rowI.state = 'ok';
+    genLog(C, `Visuels créés : ${Object.keys(D.files).length} image(s), ${D.data.questions.filter((q) => q.svg).length} schéma(s) SVG`);
     if (S.create !== C) return;
 
     validateDraft(D);
@@ -895,7 +1013,14 @@ function startTicker() {
 function stopTicker() { clearInterval(ticker); ticker = null; }
 
 /* ================================ Publication ================================ */
-async function publishMission() {
+/*
+ * Publication en ARRIÈRE-PLAN : la mission est ajoutée tout de suite au catalogue du téléphone
+ * (jouable immédiatement), et l'envoi vers Drive se fait en tâche de fond, avec reprise
+ * automatique (même après fermeture de l'app) grâce à une file d'attente sauvegardée.
+ */
+function saveJobs() { return IDB.set('jobs', S.jobs); }
+
+async function publishMission(playNow) {
   const C = S.create, D = C.draft;
   const questions = D.data.questions.filter((q, i) => !D.removed.has(i));
   if (!questions.length) { toast('Garde au moins une question.'); return; }
@@ -903,41 +1028,89 @@ async function publishMission() {
   const used = new Set();
   const collect = (q) => { if (q.image && D.files[q.image]) used.add(q.image); (q.questions || []).forEach(collect); };
   questions.forEach(collect);
-
-  const files = [...used].map((name) => ({ folder: 'images', name, mime: 'image/jpeg', data: b64(D.files[name]) }));
-  C.photos.forEach((p, i) => files.push({ folder: `_sources/${D.base}`, name: `photo-${pad2(i + 1)}.jpg`, mime: 'image/jpeg', data: b64(p.dataUrl) }));
-
-  C.stage = 'publish'; C.progress = { step: 'Publication dans Google Drive…', detail: '', startedAt: Date.now() };
-  render();
-  await keepAwake(true);
-  try {
-    // Envois par lots (< ~3 Mo) : images d'abord, puis le fichier de questions
-    let batch = [], size = 0, sent = 0;
-    const flush = async () => {
-      if (!batch.length) return;
-      await apiPost({ action: 'uploadFiles', admin: S.parent.adminCode, files: batch });
-      sent += batch.length; batch = []; size = 0;
-      setProgress('Publication dans Google Drive…', `${sent} / ${files.length} fichiers`);
-    };
-    for (const f of files) {
-      if (size + f.data.length > 3e6) await flush();
-      batch.push(f); size += f.data.length;
-    }
-    await flush();
-    await apiPost({ action: 'saveMission', admin: S.parent.adminCode, folder: data.matiere, name: D.fileName, content: JSON.stringify(data, null, 2) });
-    const n = questions.reduce((a, q) => a + (q.type === 'situation' ? (q.questions || []).length : 1), 0);
-    S.create = null; IDB.del('create'); keepAwake(false);
-    S.sel[data.matiere + '|||' + data.theme] = true; LS.set('sel', S.sel);
+  const job = {
+    id: uid(), createdAt: new Date().toISOString(), folder: data.matiere, fileName: D.fileName,
+    content: JSON.stringify(data, null, 2),
+    images: [...used].map((name) => ({ name, data: D.files[name] })),
+    sources: C.photos.map((p, i) => ({ folder: `_sources/${D.base}`, name: `photo-${pad2(i + 1)}.jpg`, data: p.dataUrl })),
+    uploaded: [],
+  };
+  S.jobs.push(job);
+  await saveJobs();
+  rebuildDb();
+  const n = questions.reduce((a, q) => a + (q.type === 'situation' ? (q.questions || []).length : 1), 0);
+  S.create = null; IDB.del('create');
+  S.sel[data.matiere + '|||' + data.theme] = true; LS.set('sel', S.sel);
+  if (playNow) {
+    const items = S.db.questions.filter((q) => q.file === job.fileName);
+    startQuiz({ items: shuffle(items), n: 'all', mode: 'random' });
+  } else {
     go('home', true);
-    toast(`Mission publiée : ${plural(n, 'question')}`);
+    toast(`Mission prête : ${plural(n, 'question')} (envoi vers Drive en cours)`);
     setTimeout(() => showMascot('star', `Nouvelle mission « ${data.theme} » prête au décollage !`, { pos: 'bottom', ms: 3600 }), 400);
-    syncCatalog();
-  } catch (e) {
-    keepAwake(false);
-    C.stage = 'preview'; C.error = 'Publication impossible : ' + e.message;
-    render();
   }
+  runPublishQueue();
 }
+
+let publishing = false;
+async function runPublishQueue() {
+  if (publishing || !S.cfg.api || !S.parent.adminCode) return;
+  publishing = true;
+  try {
+    while (S.jobs.length) {
+      const job = S.jobs[0];
+      const files = job.images.map((im) => ({ folder: 'images', name: im.name, mime: 'image/jpeg', data: b64(im.data) }))
+        .concat(job.sources.map((p) => ({ folder: p.folder, name: p.name, mime: 'image/jpeg', data: b64(p.data) })));
+      const total = files.length + 1;
+      const done = new Set(job.uploaded || []);
+      S.publish = { name: job.fileName, sent: done.size, total, state: 'run', msg: '' };
+      render();
+      // Envois par lots (< ~3 Mo), en reprenant là où on s'était arrêté
+      let batch = [], size = 0;
+      const flush = async () => {
+        if (!batch.length) return;
+        await apiPost({ action: 'uploadFiles', admin: S.parent.adminCode, files: batch });
+        batch.forEach((f) => done.add(f.folder + '/' + f.name));
+        job.uploaded = [...done];
+        await saveJobs();
+        batch = []; size = 0;
+        S.publish.sent = done.size; render();
+      };
+      for (const f of files) {
+        if (done.has(f.folder + '/' + f.name)) continue;
+        if (size + f.data.length > 3e6) await flush();
+        batch.push(f); size += f.data.length;
+      }
+      await flush();
+      await apiPost({ action: 'saveMission', admin: S.parent.adminCode, folder: job.folder, name: job.fileName, content: job.content });
+      S.jobs.shift();
+      await saveJobs();
+      S.publish = null;
+      // Images déjà sur le téléphone : on les garde en mémoire pour ne pas les retélécharger depuis Drive
+      job.images.forEach((im) => { LOCAL_IMAGES[im.name.toLowerCase()] = im.data; });
+      await syncCatalog();
+      toast(`« ${job.fileName} » est dans Drive`);
+    }
+  } catch (e) {
+    if (S.publish) Object.assign(S.publish, { state: 'err', msg: e.message });
+    render();
+  } finally { publishing = false; }
+}
+
+async function cancelJob(id) {
+  S.jobs = S.jobs.filter((j) => j.id !== id);
+  await saveJobs();
+  if (S.publish && !S.jobs.length) S.publish = null;
+}
+
+// Au démarrage : reprendre les envois interrompus
+IDB.get('jobs').then((jobs) => {
+  if (!Array.isArray(jobs) || !jobs.length) return;
+  S.jobs = jobs;
+  if (S.raw) { rebuildDb(); render(); }
+  runPublishQueue();
+});
+window.addEventListener('online', () => { if (S.jobs.length) runPublishQueue(); });
 
 /* ================================ Vues ================================ */
 function newCreate() {
@@ -1051,7 +1224,8 @@ function viewCreatePreview(C) {
       </div>`;
     }).join('')}
     <div class="sticky-cta">
-      <button class="btn primary xl" data-action="c-publish" ${nKept ? '' : 'disabled'}>${ic('check')} Publier ${plural(nKept, 'question')}</button>
+      <button class="btn primary xl" data-action="c-publish-play" ${nKept ? '' : 'disabled'}>${ic('play')} Publier et s'entraîner tout de suite</button>
+      <button class="btn ghost block" data-action="c-publish" ${nKept ? '' : 'disabled'}>${ic('check')} Publier ${plural(nKept, 'question')} et revenir à l'accueil</button>
       <button class="btn ghost block" data-action="c-back-form">${ic('retry')} Modifier les réglages et régénérer</button>
     </div>
   </section>`;
@@ -1072,6 +1246,10 @@ function parentSettingsCard() {
     ${P.models.length ? `
       <label>Modèle pour les questions<select data-bind-parent="textModel">${opt(text, P.textModel)}</select></label>
       <label>Modèle pour les illustrations<select data-bind-parent="imageModel">${opt(imgs, P.imageModel, 'Aucun (pas d\'illustrations)')}</select></label>` : ''}
+    <button class="switch-row" role="switch" aria-checked="${!!P.saveResults}" data-action="p-save-results">
+      <span><strong>Enregistrer mes quiz dans l'historique de l'élève</strong><small>Désactivé : les quiz que tu fais pour tester ne faussent pas sa progression.</small></span>
+      <span class="switch ${P.saveResults ? 'on' : ''}"><i></i></span>
+    </button>
     <button class="btn primary block" data-action="p-test">${ic('check')} Tester et enregistrer</button>
     ${P.textModel ? `<p class="ok-t small">${ic('check')} Prêt : questions avec ${esc(P.textModel)}${P.imageModel ? `, illustrations avec ${esc(P.imageModel)}` : ''}</p>` : ''}
     ${P.geminiKey ? '<button class="btn ghost block" data-action="p-clear">Désactiver le mode parent sur cet appareil</button>' : ''}
@@ -1099,7 +1277,9 @@ Object.assign(ACTIONS, {
   'c-cancel-gen': () => { const C = S.create; S.create = Object.assign(newCreate(), { matiereNew: C.matiereNew, theme: C.theme, titre: C.titre, n: C.n, consignes: C.consignes, illus: C.illus, photos: C.photos }); stopTicker(); keepAwake(false); render(); saveCreateState(); },
   'c-toggle-q': (d) => { const D = S.create.draft, i = Number(d.i); if (D.removed.has(i)) D.removed.delete(i); else D.removed.add(i); render(); saveCreateState(); },
   'c-back-form': () => { const C = S.create; C.stage = 'form'; C.draft = null; C.error = ''; render(); saveCreateState(); window.scrollTo(0, 0); },
-  'c-publish': () => publishMission(),
+  'c-publish': () => publishMission(false),
+  'c-publish-play': () => publishMission(true),
+  'pub-retry': () => runPublishQueue(),
   'c-copy-log': async () => { try { await navigator.clipboard.writeText((S.create.log || []).join('\n')); toast('Détails copiés'); } catch (e) { toast('Copie impossible'); } },
   'p-test': async () => {
     const P = S.parent;
@@ -1118,6 +1298,7 @@ Object.assign(ACTIONS, {
     catch (e) { saveParent(); render(); toast('Code parent : ' + e.message); return; }
     saveParent(); render(); toast('Mode parent activé !');
   },
+  'p-save-results': () => { S.parent.saveResults = !S.parent.saveResults; saveParent(); render(); },
   'p-clear': () => {
     S.parent = { geminiKey: '', adminCode: '', niveau: S.parent.niveau, textModel: '', imageModel: '', illus: false, models: [] };
     saveParent(); setValue('p-gkey', ''); setValue('p-admin', ''); render(); toast('Mode parent désactivé sur cet appareil');

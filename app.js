@@ -1,7 +1,7 @@
 /* Mission Révision — PWA de quiz alimentée par un dossier Google Drive (via Apps Script) */
 'use strict';
 
-const APP_VERSION = '2.2.0';
+const APP_VERSION = '2.5.0';
 
 /* ================================ Stockage local ================================ */
 const LS = {
@@ -30,6 +30,9 @@ const S = {
   // Mode parent (création de missions) : configuré seulement sur le téléphone du parent
   parent: Object.assign({ geminiKey: '', adminCode: '', niveau: 'Secondaire 1 (Québec)', textModel: '', imageModel: '', illus: false, models: [] }, LS.get('parent', {})),
   create: null,
+  jobs: [],          // missions générées en attente d'envoi vers Drive (déjà jouables)
+  publish: null,     // état de l'envoi en arrière-plan
+  delArm: '',        // fichier dont la suppression attend confirmation
 };
 const parentReady = () => !!(S.cfg.api && S.parent.geminiKey && S.parent.adminCode && S.parent.textModel);
 
@@ -167,6 +170,8 @@ function normQ(q, ctx, db, label, isSub) {
     indice: str(q.indice), explication: str(q.explication),
     astuce: str(q.astuce || q.astuce_mnemo),
     page: str(q.page != null ? q.page : q.reference_page) || ctx.page || '',
+    photo: Number(q.photo) > 0 ? Number(q.photo) : (ctx.photo || 0),
+    srcBase: ctx.srcBase || '',
     difficulte: Number(q.difficulte) || 0,
     img: imageRef(q, db, warn),
   };
@@ -227,7 +232,7 @@ function normQ(q, ctx, db, label, isSub) {
       if (!it.contexte && !it.img) warn('contexte vide');
       it.subs = [];
       (Array.isArray(q.questions) ? q.questions : []).forEach((s, i) => {
-        const r = normQ(s, { ...ctx, matiere: it.matiere, theme: it.theme, notion: it.notion, page: it.page }, db, `${label}.${i + 1}`, true);
+        const r = normQ(s, { ...ctx, matiere: it.matiere, theme: it.theme, notion: it.notion, page: it.page, photo: it.photo }, db, `${label}.${i + 1}`, true);
         issues.push(...r.issues);
         if (r.item) it.subs.push(r.item);
       });
@@ -246,9 +251,13 @@ function normQ(q, ctx, db, label, isSub) {
   return { item: it, issues };
 }
 
+/* Images générées sur ce téléphone : affichées depuis la mémoire plutôt que retéléchargées depuis Drive */
+const LOCAL_IMAGES = {};
+
 function buildDb(raw) {
-  const db = { questions: [], files: [], tree: {}, images: {}, byKey: {}, nImages: 0 };
-  (raw.images || []).forEach((img) => {
+  const db = { questions: [], files: [], tree: {}, images: {}, byKey: {}, nImages: 0, sources: raw.sources || {} };
+  (raw.images || []).forEach((img0) => {
+    const img = !img0.url && LOCAL_IMAGES[img0.name.toLowerCase()] ? Object.assign({}, img0, { url: LOCAL_IMAGES[img0.name.toLowerCase()] }) : img0;
     db.nImages++;
     const n = img.name.toLowerCase();
     db.images[n] = img;
@@ -269,7 +278,7 @@ function buildDb(raw) {
   };
 
   (raw.files || []).forEach((f) => {
-    const info = { name: f.name, path: f.path || '', updated: f.updated, count: 0, titre: '', issues: [] };
+    const info = { id: f.id, local: !!f.local, name: f.name, path: f.path || '', updated: f.updated, count: 0, titre: '', issues: [] };
     const blocks = Array.isArray(f.data) ? f.data : [f.data];
     blocks.forEach((b, bi) => {
       const where = blocks.length > 1 ? `Bloc ${bi + 1}` : 'Fichier';
@@ -278,7 +287,8 @@ function buildDb(raw) {
       if (!Array.isArray(b.questions)) { info.issues.push({ level: 'error', msg: `${where} : champ « questions » manquant` }); return; }
       if (!b.matiere) info.issues.push({ level: 'warn', msg: `${where} : « matiere » manquante` });
       if (!b.theme && !b.sujet) info.issues.push({ level: 'warn', msg: `${where} : « theme » manquant` });
-      const ctx = { matiere: str(b.matiere) || 'Sans matière', theme: str(b.theme || b.sujet) || 'Général', notion: '', page: '', file: f.name };
+      const ctx = { matiere: str(b.matiere) || 'Sans matière', theme: str(b.theme || b.sujet) || 'Général', notion: '', page: '', file: f.name,
+        srcBase: (b.sources && str(b.sources.dossier)) || f.name.replace(/\.json$/i, '') };
       b.questions.forEach((q, qi) => {
         const label = `Q${qi + 1}` + (q && q.id ? ` (${q.id})` : '');
         const r = normQ(q, ctx, db, label, false);
@@ -305,21 +315,30 @@ const stepKeys = (it) => (it.type === 'situation' ? it.subs.map((s) => s.key) : 
 const sortAlpha = (a, b) => a.localeCompare(b, 'fr');
 
 /* ================================ API Apps Script ================================ */
+/* fetch avec délai maximum (un relais qui ne répond pas ne bloque jamais l'app) */
+async function fetchTimeout(url, opts, ms) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try { return await fetch(url, Object.assign({}, opts, { signal: ctrl.signal })); }
+  catch (e) { throw new Error(e.name === 'AbortError' ? 'le relais Google ne répond pas (délai dépassé)' : 'connexion impossible (' + e.message + ')'); }
+  finally { clearTimeout(t); }
+}
 async function api(action, params = {}) {
   const u = new URL(S.cfg.api);
   u.searchParams.set('action', action);
   if (S.cfg.key) u.searchParams.set('key', S.cfg.key);
   Object.entries(params).forEach(([k, v]) => u.searchParams.set(k, v));
-  const r = await fetch(u.toString(), { redirect: 'follow' });
+  const r = await fetchTimeout(u.toString(), { redirect: 'follow' }, 90000);
   if (!r.ok) throw new Error('erreur réseau ' + r.status);
   let j;
   try { j = await r.json(); } catch (e) { throw new Error('réponse inattendue — le script est-il déployé avec l\'accès « Tout le monde » ?'); }
   if (!j.ok) throw new Error(j.error || 'erreur du script');
   return j;
 }
-async function apiPost(body) {
-  const r = await fetch(S.cfg.api, { method: 'POST', body: JSON.stringify({ ...body, key: S.cfg.key }), redirect: 'follow' });
-  const j = await r.json();
+async function apiPost(body, timeoutMs = 120000) {
+  const r = await fetchTimeout(S.cfg.api, { method: 'POST', body: JSON.stringify({ ...body, key: S.cfg.key }), redirect: 'follow' }, timeoutMs);
+  let j;
+  try { j = await r.json(); } catch (e) { throw new Error('réponse inattendue du relais (' + r.status + ')'); }
   if (!j.ok) throw new Error(j.error || 'erreur du script');
   return j;
 }
@@ -345,6 +364,24 @@ function mergeHistory(server) {
   LS.set('history', S.history);
 }
 
+/* Catalogue affiché = catalogue Drive + missions générées pas encore arrivées dans Drive */
+function withLocal(raw) {
+  if (!raw || !S.jobs || !S.jobs.length) return raw;
+  const files = (raw.files || []).slice(), images = (raw.images || []).slice();
+  const haveFile = new Set(files.map((f) => (f.path || '') + '/' + f.name));
+  const haveImg = new Set(images.map((i) => i.name.toLowerCase()));
+  const sources = Object.assign({}, raw.sources || {});
+  S.jobs.forEach((j) => {
+    if (haveFile.has(j.folder + '/' + j.fileName)) return;
+    try { files.push({ id: 'local:' + j.id, name: j.fileName, path: j.folder, updated: j.createdAt, data: JSON.parse(j.content), local: true }); } catch (e) { return; }
+    (j.images || []).forEach((im) => { if (!haveImg.has(im.name.toLowerCase())) images.push({ id: 'local:' + im.name, name: im.name, url: im.data, updated: '' }); });
+    const base = j.sources && j.sources[0] ? j.sources[0].folder.replace(/^_sources\//, '') : '';
+    if (base && !sources[base]) sources[base] = j.sources.map((p) => ({ id: 'local:' + p.name, name: p.name, url: p.data }));
+  });
+  return Object.assign({}, raw, { files, images, sources });
+}
+function rebuildDb() { S.db = buildDb(withLocal(S.raw)); }
+
 async function syncCatalog() {
   if (S.sync.loading) return;
   if (!S.cfg.api) {
@@ -355,12 +392,31 @@ async function syncCatalog() {
   S.sync = { loading: true, msg: 'Synchronisation avec Google Drive…', type: 'info' };
   render();
   try {
-    const cat = await api('catalog');
+    // Synchro incrémentale : on n'envoie que la liste (id → date) des fichiers déjà en cache,
+    // le relais ne renvoie le contenu que des fichiers nouveaux ou modifiés
+    let cat = null;
+    const cached = S.raw && S.raw.source === 'drive' ? (S.raw.files || []) : [];
+    if (cached.length) {
+      const known = {};
+      cached.forEach((f) => { if (f.id && f.updated) known[f.id] = f.updated; });
+      try {
+        const inc = await apiPost({ action: 'catalog', known }, 60000);
+        if (inc.incremental) {
+          const byId = {};
+          cached.forEach((f) => { byId[f.id] = f; });
+          if (inc.files.every((f) => !f.unchanged || byId[f.id])) {
+            inc.files = inc.files.map((f) => (f.unchanged ? byId[f.id] : f));
+            cat = inc;
+          }
+        }
+      } catch (e) { /* relais ancien ou erreur : synchro complète */ }
+    }
+    if (!cat) cat = await api('catalog');
     const { history, ...rest } = cat;
     S.raw = { ...rest, source: 'drive', syncedAt: new Date().toISOString() };
     LS.set('catalog', S.raw);
     mergeHistory(history);
-    S.db = buildDb(S.raw);
+    rebuildDb();
     S.sync = { loading: false, msg: '', type: S.db.nErrors ? 'warn' : 'ok' };
     flushPending();
   } catch (e) {
@@ -722,9 +778,11 @@ function finishQuiz() {
   LS.set('history', S.history);
   const pct = total ? Math.round(100 * Q.score / total) : 0;
   const tier = pct === 100 ? 'perfect' : pct >= 80 ? 'great' : pct >= 60 ? 'good' : 'low';
-  S.last = { ...session, saved: S.cfg.api ? 'pending' : 'local', pct, tier, msg: pick(MSG.results[tier], 'res' + tier) };
+  // Sur le téléphone du parent (mode parent), les quiz d'essai ne vont pas dans l'historique de l'élève, sauf si demandé
+  const toDrive = S.cfg.api && !(S.parent.geminiKey && !S.parent.saveResults);
+  S.last = { ...session, saved: toDrive ? 'pending' : S.cfg.api ? 'parent' : 'local', pct, tier, msg: pick(MSG.results[tier], 'res' + tier) };
   S.celebrate = true;
-  if (S.cfg.api) { S.pending.push(session); LS.set('pending', S.pending); flushPending(); }
+  if (toDrive) { S.pending.push(session); LS.set('pending', S.pending); flushPending(); }
   go('results', true);
 }
 
@@ -945,6 +1003,7 @@ function afterRender() {
 function go(view, replace) {
   S.view = view;
   S.zoom = null;
+  if (VW.el) closeViewer(true);
   hideMascot(true);
   try { history[replace ? 'replaceState' : 'pushState']({ v: view }, ''); } catch (e) { /* */ }
   render();
@@ -952,7 +1011,8 @@ function go(view, replace) {
 }
 
 window.addEventListener('popstate', (e) => {
-  if (S.zoom) { S.zoom = null; render(); return; }
+  if (VW.ignorePop) { VW.ignorePop = false; return; }
+  if (VW.el) { closeViewer(true); return; }
   if (S.prep) { S.prep.cancelled = true; S.prep = null; S.quiz = null; }
   if (S.view === 'quiz' && S.quiz && !S.quiz.finished) {
     try { history.pushState({ v: 'quiz' }, ''); } catch (err) { /* */ }
@@ -997,6 +1057,7 @@ function viewHome() {
     </div>
     ${demo ? `<div class="banner">${ic('alert')}<div><strong>Mode démo.</strong> Ce sont des questions d'exemple. Connecte ton dossier Google Drive dans <button class="link" data-action="go" data-v="settings">Réglages</button>.</div></div>` : ''}
     ${syncLine()}
+    ${S.publish ? publishCard() : ''}
     <button class="btn primary xl" data-action="go" data-v="setup" ${db && db.total ? '' : 'disabled'}>${ic('play')} Nouvelle mission</button>
     ${parentReady() ? `<button class="btn create-btn xl" data-action="create-open">${ic('camera')} Créer une mission à partir de photos</button>` : ''}
     ${review ? `<button class="btn warn-btn xl" data-action="review-all">${ic('target')} Revoir mes erreurs <span class="pill">${review}</span></button>` : ''}
@@ -1174,7 +1235,7 @@ function feedback(step, a, Q, past) {
     ${it.explication ? `<p class="expl">${fmt(it.explication)}</p>` : ''}
     ${it.astuce ? `<div class="tip">${ic('spark')}<div><small>Astuce de pro</small><span>${fmt(it.astuce)}</span></div></div>` : ''}
     <div class="fb-foot">
-      ${it.page ? `<span class="chip">${ic('book')} Page ${esc(it.page)}</span>` : '<span></span>'}
+      ${pageChip(it, '')}
       ${past
         ? `<button class="btn dark" data-action="nav" data-d="1">${Q.vi + 1 === Q.i ? 'Question en cours' : 'Suivante'} ${ic('right')}</button>`
         : `<button class="btn dark" data-action="next">${last ? 'Voir le bilan' : 'Suivante'} ${ic('right')}</button>`}
@@ -1188,7 +1249,7 @@ function viewResults() {
   const mood = { perfect: 'star', great: 'proud', good: 'happy', low: 'encourage' }[r.tier] || 'happy';
   const tone = pct >= 80 ? 'good' : pct >= 60 ? 'mid' : 'low';
   const missed = Q.steps.filter((s, i) => Q.log[i] && !Q.log[i].premierEssai);
-  const saved = r.saved === 'drive' ? `${ic('check')} Résultat enregistré dans Drive` : r.saved === 'pending' ? `${ic('sync')} Enregistrement dans Drive…` : 'Résultat enregistré sur cet appareil (mode démo)';
+  const saved = r.saved === 'drive' ? `${ic('check')} Résultat enregistré dans Drive` : r.saved === 'pending' ? `${ic('sync')} Enregistrement dans Drive…` : r.saved === 'parent' ? 'Quiz d\'essai (mode parent) : non enregistré dans l\'historique de l\'élève' : 'Résultat enregistré sur cet appareil (mode démo)';
   return `<section class="page results">
     <h1 class="center">Bilan de mission</h1>
     <div class="ring ${tone}" style="--p:${pct}"><div><strong data-count="${pct}">${pct}%</strong><small>${r.score} / ${r.total}</small></div></div>
@@ -1200,7 +1261,7 @@ function viewResults() {
         ${s.sit ? `<p class="small muted">Mise en situation${s.sit.titre ? ' — ' + esc(s.sit.titre) : ''}</p>` : ''}
         <p class="q">${fmt(s.item.text)}</p>
         <p class="a">${answerText(s.item)}</p>
-        ${s.item.page ? `<span class="chip small">${ic('book')} p. ${esc(s.item.page)}</span>` : ''}
+        ${pageChip(s.item, 'small')}
       </div>`).join('')}</div>
       <button class="btn warn-btn xl" data-action="redo-missed">${ic('retry')} Refaire ces ${missed.length} questions</button>` : ''}
     <button class="btn primary xl" data-action="go" data-v="setup">${ic('play')} Nouvelle mission</button>
@@ -1239,6 +1300,17 @@ function viewProgress() {
   </section>`;
 }
 
+function publishCard() {
+  const P = S.publish;
+  return `<div class="card pub ${P.state}">
+    <span class="pub-ic">${P.state === 'err' ? ic('alert') : `<span class="spin">${ic('sync')}</span>`}</span>
+    <div class="grow"><strong>${P.state === 'err' ? 'Envoi vers Drive interrompu' : 'Envoi vers Drive…'}</strong>
+      <small>${esc(P.name)} · ${P.sent} / ${P.total}${P.msg ? ' · ' + esc(P.msg) : ''}</small>
+      <small>${P.state === 'err' ? 'La mission reste jouable sur ce téléphone ; l\'envoi reprendra automatiquement.' : 'Tu peux déjà t\'entraîner sur cette mission.'}</small></div>
+    ${P.state === 'err' ? '<button class="btn small" data-action="pub-retry">Réessayer</button>' : ''}
+  </div>`;
+}
+
 function viewLibrary() {
   const db = S.db, raw = S.raw || {};
   const files = db.files.slice().sort((a, b) => sortAlpha((a.path + '/' + a.name), (b.path + '/' + b.name)));
@@ -1254,10 +1326,21 @@ function viewLibrary() {
         <div class="stat"><strong>${db.nImages}</strong><small>images</small></div>
       </div>
     </div>
+    ${S.publish ? publishCard() : ''}
     ${files.map((f) => {
       const errs = f.issues.filter((i) => i.level === 'error'), warns = f.issues.filter((i) => i.level === 'warn');
+      const key = (f.path || '') + '/' + f.name;
+      const armed = S.delArm === key;
+      const canDel = raw.source !== 'demo' && f.id && (f.local || (typeof parentReady === 'function' && parentReady()));
       return `<div class="card file ${errs.length ? 'has-err' : warns.length ? 'has-warn' : ''}">
-        <div class="file-head"><div><strong>${esc(f.name)}</strong><small>${esc(f.path || 'racine')}${f.titre ? ' · ' + esc(f.titre) : ''}</small></div><span class="chip">${f.count} Q</span></div>
+        <div class="file-head"><div><strong>${esc(f.name)}</strong><small>${esc(f.path || 'racine')}${f.titre ? ' · ' + esc(f.titre) : ''}${f.local ? ' · <b class="amber-t">en cours d\'envoi vers Drive</b>' : ''}</small></div><span class="chip">${f.count} Q</span></div>
+        <div class="file-actions">
+          ${f.count ? `<button class="link" data-action="lib-play" data-k="${esc(key)}">${ic('play')} S'entraîner</button>` : ''}
+          ${canDel ? (armed
+            ? `<button class="btn small danger" data-action="lib-del" data-k="${esc(key)}" ${S.delBusy ? 'disabled' : ''}>${S.delBusy ? `<span class="spin">${ic('sync')}</span>` : ic('trash')} Confirmer la suppression</button><button class="link" data-action="lib-del-cancel">Annuler</button>`
+            : `<button class="link red-t" data-action="lib-del-arm" data-k="${esc(key)}">${ic('trash')} Supprimer</button>`) : ''}
+        </div>
+        ${armed ? `<p class="small muted">Le fichier, ses images et ses photos d'origine iront dans la corbeille de Google Drive (récupérables 30 jours).</p>` : ''}
         ${f.issues.length ? `<details ${errs.length ? 'open' : ''}><summary>${errs.length ? `<b class="red-t">${plural(errs.length, 'erreur')}</b>` : ''}${errs.length && warns.length ? ' · ' : ''}${warns.length ? `<b class="amber-t">${plural(warns.length, 'avertissement')}</b>` : ''}</summary>
           <ul class="issues">${f.issues.map((i) => `<li class="${i.level}">${esc(i.msg)}</li>`).join('')}</ul></details>` : `<p class="ok-t small">${ic('check')} Aucun problème</p>`}
       </div>`;
@@ -1298,8 +1381,127 @@ function viewSettings() {
   </section>`;
 }
 
-function viewZoom() {
-  return S.zoom ? `<div class="zoom" data-action="unzoom"><img src="${esc(S.zoom)}" alt=""><button class="icon-btn" aria-label="Fermer">${ic('x')}</button></div>` : '';
+/* ================================ Photos d'origine et visionneuse (zoom) ================================ */
+function sourceRefs(base) {
+  const list = (S.db && S.db.sources && S.db.sources[base]) || [];
+  return list.map((x) => (x.url ? { kind: 'url', src: x.url, name: x.name } : { kind: 'drive', id: x.id, v: x.updated || '', name: x.name }));
+}
+/* Pastille « Page 12 » : cliquable quand les photos d'origine de la mission sont disponibles */
+function pageChip(it, size) {
+  const has = it.srcBase && sourceRefs(it.srcBase).length;
+  const label = it.page ? (size ? `p. ${esc(it.page)}` : `Page ${esc(it.page)}`) : 'Voir la page';
+  if (has) return `<button class="chip chip-btn ${size}" data-action="src-open" data-base="${esc(it.srcBase)}" data-photo="${it.photo || 0}" data-page="${esc(it.page || '')}">${ic('book')} ${label} ${ic('image', 'chip-ic')}</button>`;
+  return it.page ? `<span class="chip ${size}">${ic('book')} ${label}</span>` : (size ? '' : '<span></span>');
+}
+
+const VW = { el: null, list: [], i: 0, title: '', scale: 1, x: 0, y: 0, ptrs: new Map(), pinch: null, pan: null, lastTap: 0, ignorePop: false };
+function openViewer(list, i, title) {
+  if (!list.length) return;
+  closeViewer(true);
+  Object.assign(VW, { list, i: Math.max(0, Math.min(i, list.length - 1)), title: title || '' });
+  const el = document.createElement('div');
+  el.className = 'viewer';
+  el.innerHTML = `<div class="vw-top"><div class="vw-title"></div><button class="icon-btn vw-close" aria-label="Fermer">${ic('x')}</button></div>
+    <div class="vw-stage"><img class="vw-img" alt="" draggable="false"><div class="vw-spin"><span class="spin">${ic('sync')}</span></div></div>
+    <div class="vw-bottom"><button class="icon-btn vw-prev" aria-label="Photo précédente">${ic('left')}</button>
+      <span class="vw-count"></span><button class="icon-btn vw-next" aria-label="Photo suivante">${ic('right')}</button></div>
+    <p class="vw-hint">Pince pour zoomer · touche deux fois · glisse pour changer de photo</p>`;
+  document.body.appendChild(el);
+  VW.el = el;
+  el.querySelector('.vw-close').onclick = () => closeViewer();
+  el.querySelector('.vw-prev').onclick = () => showPhoto(VW.i - 1);
+  el.querySelector('.vw-next').onclick = () => showPhoto(VW.i + 1);
+  wireGestures(el.querySelector('.vw-stage'), el.querySelector('.vw-img'));
+  showPhoto(VW.i);
+  try { history.pushState({ v: S.view, viewer: true }, ''); } catch (e) { /* */ }
+}
+function closeViewer(silent) {
+  if (!VW.el) return;
+  VW.el.remove(); VW.el = null; VW.ptrs.clear();
+  if (!silent && history.state && history.state.viewer) { VW.ignorePop = true; try { history.back(); } catch (e) { VW.ignorePop = false; } }
+}
+function showPhoto(i) {
+  if (!VW.el || i < 0 || i >= VW.list.length) return;
+  VW.i = i; VW.scale = 1; VW.x = 0; VW.y = 0;
+  const img = VW.el.querySelector('.vw-img'), spin = VW.el.querySelector('.vw-spin');
+  img.style.transform = ''; img.removeAttribute('src'); spin.style.display = '';
+  VW.el.querySelector('.vw-title').textContent = VW.title + (VW.list.length > 1 ? ` · photo ${i + 1} / ${VW.list.length}` : '');
+  VW.el.querySelector('.vw-count').textContent = VW.list.length > 1 ? `${i + 1} / ${VW.list.length}` : '';
+  VW.el.querySelector('.vw-prev').disabled = i === 0;
+  VW.el.querySelector('.vw-next').disabled = i === VW.list.length - 1;
+  VW.el.querySelector('.vw-bottom').style.visibility = VW.list.length > 1 ? '' : 'hidden';
+  const ref = VW.list[i];
+  const p = ref.kind === 'url' || ref.kind === 'svg' ? Promise.resolve(ref.src) : loadImage(ref);
+  p.then((src) => { if (VW.el && VW.i === i && src) { img.onload = () => { spin.style.display = 'none'; }; img.src = src; } })
+    .catch(() => { if (VW.el) spin.innerHTML = '<span class="vw-err">Photo indisponible (hors ligne ?)</span>'; });
+}
+function wireGestures(stage, img) {
+  const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+  const apply = () => { img.style.transform = `translate(${VW.x}px, ${VW.y}px) scale(${VW.scale})`; };
+  const clamp = () => {
+    const r = stage.getBoundingClientRect();
+    const mx = Math.max(0, (img.clientWidth * VW.scale - r.width) / 2), my = Math.max(0, (img.clientHeight * VW.scale - r.height) / 2);
+    VW.x = Math.max(-mx, Math.min(mx, VW.x)); VW.y = Math.max(-my, Math.min(my, VW.y));
+    if (VW.scale <= 1.01) { VW.scale = 1; VW.x = 0; VW.y = 0; }
+  };
+  const center = () => { const r = stage.getBoundingClientRect(); return { cx: r.left + r.width / 2, cy: r.top + r.height / 2 }; };
+  const zoomAt = (s, px, py) => {
+    const { cx, cy } = center();
+    const ux = (px - cx - VW.x) / VW.scale, uy = (py - cy - VW.y) / VW.scale;
+    VW.scale = Math.max(1, Math.min(6, s));
+    VW.x = px - cx - ux * VW.scale; VW.y = py - cy - uy * VW.scale;
+  };
+  stage.addEventListener('pointerdown', (e) => {
+    try { stage.setPointerCapture(e.pointerId); } catch (err) { /* */ }
+    VW.ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (VW.ptrs.size === 2) {
+      const [a, b] = [...VW.ptrs.values()];
+      VW.pinch = { d: dist(a, b), s: VW.scale, mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2, x: VW.x, y: VW.y };
+      VW.pan = null;
+    } else if (VW.ptrs.size === 1) {
+      VW.pan = { px: e.clientX, py: e.clientY, x: VW.x, y: VW.y, t: Date.now() };
+    }
+  });
+  stage.addEventListener('pointermove', (e) => {
+    if (!VW.ptrs.has(e.pointerId)) return;
+    VW.ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (VW.pinch && VW.ptrs.size >= 2) {
+      const [a, b] = [...VW.ptrs.values()];
+      const P = VW.pinch, { cx, cy } = center();
+      const s = Math.max(1, Math.min(6, P.s * dist(a, b) / P.d));
+      const ux = (P.mx - cx - P.x) / P.s, uy = (P.my - cy - P.y) / P.s;
+      VW.scale = s; VW.x = (a.x + b.x) / 2 - cx - ux * s; VW.y = (a.y + b.y) / 2 - cy - uy * s;
+      apply();
+    } else if (VW.pan && VW.ptrs.size === 1) {
+      const dx = e.clientX - VW.pan.px, dy = e.clientY - VW.pan.py;
+      if (VW.scale > 1) { VW.x = VW.pan.x + dx; VW.y = VW.pan.y + dy; apply(); }
+      else { img.style.transform = `translateX(${dx * 0.6}px)`; }
+    }
+  });
+  const end = (e) => {
+    if (!VW.ptrs.has(e.pointerId)) return;
+    VW.ptrs.delete(e.pointerId);
+    if (VW.pinch && VW.ptrs.size < 2) {
+      VW.pinch = null;
+      const rest = [...VW.ptrs.values()][0];
+      VW.pan = rest ? { px: rest.x, py: rest.y, x: VW.x, y: VW.y, t: 0 } : null;
+      clamp(); apply(); return;
+    }
+    if (VW.pan && VW.ptrs.size === 0) {
+      const dx = e.clientX - VW.pan.px, dy = e.clientY - VW.pan.py, dt = Date.now() - VW.pan.t;
+      VW.pan = null;
+      if (VW.scale === 1 && Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy)) { showPhoto(VW.i + (dx < 0 ? 1 : -1)); if (VW.el) img.style.transform = ''; return; }
+      if (Math.abs(dx) < 10 && Math.abs(dy) < 10 && dt < 300) {
+        const now = Date.now();
+        if (now - VW.lastTap < 320) { if (VW.scale > 1) { VW.scale = 1; VW.x = 0; VW.y = 0; } else zoomAt(2.5, e.clientX, e.clientY); VW.lastTap = 0; }
+        else VW.lastTap = now;
+      }
+      clamp(); apply();
+    }
+  };
+  stage.addEventListener('pointerup', end);
+  stage.addEventListener('pointercancel', end);
+  stage.addEventListener('wheel', (e) => { e.preventDefault(); zoomAt(VW.scale * (e.deltaY < 0 ? 1.2 : 1 / 1.2), e.clientX, e.clientY); clamp(); apply(); }, { passive: false });
 }
 
 /* ================================ Rendu ================================ */
@@ -1315,7 +1517,7 @@ function render() {
   if (S.view === 'settings') html = viewSettings();
   else if (!S.db) html = `<div class="boot">${S.sync.type === 'error' ? `<p>${esc(S.sync.msg)}</p><button class="btn primary" data-action="go" data-v="settings">Réglages</button>` : 'Chargement…'}</div>`;
   else html = VIEWS[S.view]();
-  app.innerHTML = html + viewZoom() + (S.toast ? `<div class="toast">${esc(S.toast)}</div>` : '');
+  app.innerHTML = html + (S.toast ? `<div class="toast">${esc(S.toast)}</div>` : '');
   Object.keys(keep).forEach((id) => setValue(id, keep[id]));
   app.classList.toggle('enter', app.dataset.view !== S.view || !!S.enter);
   app.classList.toggle('flash', !!S.flash);
@@ -1356,6 +1558,46 @@ const ACTIONS = {
   },
   theme: (d) => { S.theme = d.val; LS.set('theme', S.theme); applyTheme(); render(); },
   launch: () => launchFromSetup(),
+  'lib-play': (d) => {
+    const f = S.db.files.find((x) => (x.path || '') + '/' + x.name === d.k);
+    const items = f ? S.db.questions.filter((q) => q.file === f.name) : [];
+    if (!items.length) { toast('Aucune question valide dans ce fichier.'); return; }
+    startQuiz({ items: shuffle(items), n: S.opts.n, mode: 'random' });
+  },
+  'lib-del-arm': (d) => { S.delArm = d.k; render(); },
+  'lib-del-cancel': () => { S.delArm = ''; render(); },
+  'lib-del': async (d) => {
+    const raw = withLocal(S.raw);
+    const f = (raw.files || []).find((x) => (x.path || '') + '/' + x.name === d.k);
+    if (!f) return;
+    if (f.local) {
+      if (typeof cancelJob === 'function') await cancelJob(String(f.id).slice(6));
+      S.delArm = ''; rebuildDb(); render(); toast('Mission supprimée'); return;
+    }
+    // Images utilisées UNIQUEMENT par ce fichier (une image partagée avec un autre fichier est gardée)
+    const refs = (file) => {
+      const out = new Set();
+      const walk = (q) => { if (!q) return; if (q.image && !/^(https?:|data:)/i.test(q.image)) out.add(String(q.image).toLowerCase()); (q.questions || []).forEach(walk); };
+      (Array.isArray(file.data) ? file.data : [file.data]).forEach((b) => ((b && b.questions) || []).forEach(walk));
+      return out;
+    };
+    const mine = refs(f);
+    raw.files.forEach((o) => { if (o !== f) refs(o).forEach((n) => mine.delete(n)); });
+    const imageIds = (S.raw.images || []).filter((im) => {
+      const n = im.name.toLowerCase();
+      return mine.has(n) || [...mine].some((r) => r.replace(/\.[a-z0-9]+$/, '') === n.replace(/\.[a-z0-9]+$/, ''));
+    }).map((im) => im.id);
+    S.delBusy = true; render();
+    try {
+      await apiPost({ action: 'deleteMission', admin: S.parent.adminCode, fileId: f.id, imageIds, sources: f.name.replace(/\.json$/i, '') });
+      S.raw.files = S.raw.files.filter((x) => x.id !== f.id);
+      S.raw.images = (S.raw.images || []).filter((im) => !imageIds.includes(im.id));
+      LS.set('catalog', S.raw);
+      S.delArm = ''; rebuildDb();
+      toast(`« ${f.name} » supprimé${imageIds.length ? ` avec ${plural(imageIds.length, 'image')}` : ''}`);
+    } catch (e) { toast('Suppression impossible : ' + e.message); }
+    S.delBusy = false; render();
+  },
   'review-all': () => launchReviewAll(),
   choose: (d) => {
     if (!atCurrent()) return;
@@ -1410,8 +1652,12 @@ const ACTIONS = {
     Q.steps.forEach((s) => { if (keys.has(s.key)) { const top = S.db.questions.find((q) => q === s.item || (q.subs && q.subs.includes(s.item))); if (top && !seen.has(top)) { seen.add(top); items.push(top); } } });
     startQuiz({ items: shuffle(items), n: 'all', mode: 'errors', onlyKeys: keys });
   },
-  zoom: (d, el) => { const img = el.querySelector('img'); if (img && img.src) { S.zoom = img.src; try { history.pushState({ v: S.view }, ''); } catch (e) { /* */ } render(); } },
-  unzoom: () => { S.zoom = null; render(); },
+  zoom: (d, el) => { const img = el.querySelector('img'); if (img && img.src) openViewer([{ kind: 'url', src: img.src }], 0, img.alt || 'Image'); },
+  'src-open': (d) => {
+    const list = sourceRefs(d.base);
+    if (!list.length) { toast('Photos d\'origine indisponibles'); return; }
+    openViewer(list, Number(d.photo) > 0 ? Number(d.photo) - 1 : 0, d.page ? `Page ${d.page}` : 'Manuel');
+  },
   'save-cfg': async () => {
     const apiUrl = str(valueOf('f-api')), key = str(valueOf('f-key'));
     if (!/^https:\/\/script\.google(usercontent)?\.com\//.test(apiUrl)) { toast("L'URL doit commencer par https://script.google.com/"); return; }
@@ -1544,7 +1790,7 @@ window.addEventListener('online', () => { flushPending(); });
   } else {
     history.replaceState({ v: 'home' }, '');
   }
-  if (S.cfg.api && S.raw && S.raw.source === 'drive') { try { S.db = buildDb(S.raw); } catch (e) { S.db = null; } }
+  if (S.cfg.api && S.raw && S.raw.source === 'drive') { try { rebuildDb(); } catch (e) { S.db = null; } }
   render();
   syncCatalog();
   if ('serviceWorker' in navigator && location.protocol === 'https:') {

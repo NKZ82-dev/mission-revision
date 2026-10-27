@@ -397,6 +397,31 @@ summary { cursor: pointer; font-size: 15px; }
 .pv-sub { font-size: 15px; margin-top: 6px; }
 .pv-img { display: block; max-width: 100%; max-height: 200px; margin: 4px 0 10px; border-radius: 10px; background: #fff; border: 1px solid var(--line); padding: 4px; }
 
+/* Visionneuse des photos d'origine */
+.chip-btn { cursor: pointer; color: var(--primary); border-color: var(--primary-2); }
+.chip-btn .chip-ic { width: 15px; height: 15px; opacity: .8; }
+.viewer { position: fixed; inset: 0; z-index: 80; background: #06080f; display: flex; flex-direction: column; color: #fff; animation: rise .15s ease-out; }
+.vw-top { display: flex; align-items: center; gap: 12px; padding: calc(10px + env(safe-area-inset-top)) 14px 8px 18px; }
+.vw-title { flex: 1; font-weight: 700; font-size: 16px; }
+.viewer .icon-btn { background: rgba(255, 255, 255, .12); color: #fff; box-shadow: none; }
+.viewer .icon-btn:disabled { opacity: .3; }
+.vw-stage { position: relative; flex: 1; overflow: hidden; display: grid; place-items: center; touch-action: none; user-select: none; -webkit-user-select: none; }
+.vw-img { max-width: 100%; max-height: 100%; object-fit: contain; transform-origin: center center; will-change: transform; -webkit-user-drag: none; }
+.vw-spin { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; }
+.vw-err { font-size: 15px; opacity: .8; }
+.vw-bottom { display: flex; align-items: center; justify-content: center; gap: 18px; padding: 8px 14px 4px; font-weight: 700; }
+.vw-hint { text-align: center; font-size: 12px; opacity: .6; margin: 0; padding: 0 14px calc(10px + env(safe-area-inset-bottom)); }
+
+/* Bibliothèque : actions et envoi en arrière-plan */
+.file-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-top: 10px; }
+.file-actions .link { font-size: 14px; }
+.btn.danger { background: var(--bad); color: #fff; }
+.card.pub { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-color: var(--primary-2); }
+.card.pub.err { border-color: var(--amber-line); background: var(--amber-soft); }
+.card.pub small { display: block; color: var(--muted); font-size: 13px; }
+.pub-ic { width: 32px; height: 32px; border-radius: 99px; display: grid; place-items: center; background: var(--primary-soft); color: var(--primary); flex: none; }
+.card.pub.err .pub-ic { background: var(--surface); color: var(--amber); }
+
 /* Progression des lots et journal */
 .gen-rows { width: min(420px, 100%); display: flex; flex-direction: column; gap: 8px; text-align: left; }
 .gen-row { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: 14px; background: var(--surface); border: 1px solid var(--line); font-size: 14px; }
